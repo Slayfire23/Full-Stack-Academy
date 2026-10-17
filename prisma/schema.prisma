@@ -57,6 +57,7 @@ enum StudyKind {
   FLASHCARD
   QUIZ
   INTERVIEW
+  LESSON_PRACTICE
 }
 
 enum QuizStatus {
@@ -87,6 +88,25 @@ enum GenerationStatus {
   REJECTED
 }
 
+enum CodeLanguage {
+  TYPESCRIPT
+  SQL
+  HTTP
+  BASH
+}
+
+enum LessonStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum UnfamiliarSource {
+  FLASHCARD
+  QUIZ
+  INTERVIEW
+}
+
 // ───────────────────────── Users ─────────────────────────
 
 model User {
@@ -109,6 +129,8 @@ model User {
   studySessions      StudySession[]
   generationRequests GeneratedQuestion[] @relation("GenerationRequester")
   generationReviews  GeneratedQuestion[] @relation("GenerationReviewer")
+  lessonProgress     LessonProgress[]
+  unfamiliarMarks    UnfamiliarMark[]
 }
 
 model UserSettings {
@@ -156,26 +178,102 @@ model Topic {
   questions          Question[]
   interviewSessions  InterviewSession[]
   generatedQuestions GeneratedQuestion[]
+  unfamiliarMarks    UnfamiliarMark[]
 
   @@unique([trackId, slug])
   @@index([trackId, order])
 }
 
 model Lesson {
-  id        String   @id @default(cuid())
-  topicId   String
-  slug      String
-  title     String
-  content   String
-  order     Int      @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id               String        @id @default(cuid())
+  topicId          String
+  slug             String
+  title            String
+  /// Legacy plain-content column. The UI falls back to this when the structured fields below are empty.
+  content          String
+  /// One-line summary shown in lists and recommendations.
+  summary          String?
+  /// Markdown. The main teaching content; falls back to `content` when empty.
+  explanation      String?
+  /// Markdown. A concrete, real-world scenario illustrating the concept.
+  realWorldExample String?
+  codeExample      String?
+  codeLanguage     CodeLanguage?
+  /// Markdown. Common mistakes learners make with this concept.
+  commonMistakes   String?
+  level            Difficulty    @default(BEGINNER)
+  estimatedMinutes Int           @default(10)
+  published        Boolean       @default(true)
+  order            Int           @default(0)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
 
-  topic     Topic      @relation(fields: [topicId], references: [id], onDelete: Cascade)
-  questions Question[]
+  topic           Topic                @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  questions       Question[]
+  progress        LessonProgress[]
+  unfamiliarMarks UnfamiliarMark[]
+  prerequisites   LessonPrerequisite[] @relation("LessonPrerequisites")
+  requiredBy      LessonPrerequisite[] @relation("LessonPrerequisiteOf")
 
   @@unique([topicId, slug])
   @@index([topicId, order])
+}
+
+/// A directed edge: `lesson` should not be started before `prerequisite` is completed.
+model LessonPrerequisite {
+  lessonId       String
+  prerequisiteId String
+
+  lesson       Lesson @relation("LessonPrerequisites", fields: [lessonId], references: [id], onDelete: Cascade)
+  prerequisite Lesson @relation("LessonPrerequisiteOf", fields: [prerequisiteId], references: [id], onDelete: Cascade)
+
+  @@id([lessonId, prerequisiteId])
+  @@index([prerequisiteId])
+}
+
+/// Per-user lesson progress, tracked separately from quiz/flashcard accuracy.
+model LessonProgress {
+  id               String       @id @default(cuid())
+  userId           String
+  lessonId         String
+  status           LessonStatus @default(NOT_STARTED)
+  /// Self-rating 1-5, set when the lesson is marked complete.
+  understanding    Int?
+  practiceAttempts Int          @default(0)
+  practiceCorrect  Int          @default(0)
+  startedAt        DateTime?
+  completedAt      DateTime?
+  lastViewedAt     DateTime?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lesson Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, lessonId])
+  @@index([userId, status])
+}
+
+/// "I haven't learned this yet" — never counted as incorrect, excluded from quiz scoring,
+/// resolved when the user completes the linked lesson.
+model UnfamiliarMark {
+  id         String           @id @default(cuid())
+  userId     String
+  questionId String
+  topicId    String
+  lessonId   String?
+  source     UnfamiliarSource
+  createdAt  DateTime         @default(now())
+  resolvedAt DateTime?
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  question Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  topic    Topic    @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  lesson   Lesson?  @relation(fields: [lessonId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, questionId])
+  @@index([userId, resolvedAt])
+  @@index([lessonId])
 }
 
 model Question {
@@ -219,6 +317,7 @@ model Question {
   interviewResponses InterviewResponse[]
   generatedFrom      GeneratedQuestion[]   @relation("GenerationSource")
   generatedAs        GeneratedQuestion?    @relation("GenerationPublished")
+  unfamiliarMarks    UnfamiliarMark[]
 
   @@unique([dedupeScope, contentHash])
   @@index([topicId, published, difficulty])
@@ -384,18 +483,18 @@ model InterviewSession {
 }
 
 model InterviewResponse {
-  id               String   @id @default(cuid())
-  sessionId        String
-  questionId       String
-  response         String
+  id           String   @id @default(cuid())
+  sessionId    String
+  questionId   String
+  response     String
   /// Rubric checklist results: { conceptKey: boolean } self-assessed, plus keyword coverage.
-  rubricResult     Json?
+  rubricResult Json?
   /// AI evaluation (clearly labelled AI-generated in the UI). null when AI is not configured.
-  aiFeedback       Json?
-  aiModel          String?
-  score            Int?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  aiFeedback   Json?
+  aiModel      String?
+  score        Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   session  InterviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   question Question         @relation(fields: [questionId], references: [id], onDelete: Cascade)

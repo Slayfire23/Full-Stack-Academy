@@ -8,6 +8,7 @@ import { scheduleReview, type Rating } from "@/lib/adaptive/srs";
 import { Button, buttonClasses } from "@/components/ui/button";
 import { Badge, Card, DifficultyBadge, EmptyState, ErrorNote, Label, Select, typeLabel } from "@/components/ui/primitives";
 import { CodeBlock } from "@/components/code-block";
+import { TeachMeLink, UnfamiliarButton } from "@/components/learn/actions";
 import { cn } from "@/lib/cn";
 import type { buildQueue } from "@/server/services/flashcard.service";
 
@@ -345,15 +346,21 @@ export function FlashcardStudy({
 function CardMeta({ card, onBookmark }: { card: CardData; onBookmark: () => void }) {
   const due = card.progress?.nextReviewAt ? new Date(card.progress.nextReviewAt) : null;
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <Badge>{card.topic.title}</Badge>
-      <DifficultyBadge value={card.difficulty} />
-      {card.type !== "FLASHCARD" ? <Badge>{typeLabel(card.type)}</Badge> : null}
-      {!card.progress ? <Badge tone="accent">New</Badge> : card.progress.lastCorrect === false ? <Badge tone="bad">Missed last time</Badge> : due && due <= new Date() ? <Badge tone="accent">Due</Badge> : null}
-      {card.isCustom ? <Badge>Custom</Badge> : null}
-      <button type="button" onClick={onBookmark} className="ml-auto rounded-md p-1.5 text-muted hover:bg-surface-2 hover:text-text" aria-pressed={card.bookmarked} aria-label={card.bookmarked ? "Remove bookmark" : "Bookmark this question"}>
-        {card.bookmarked ? <BookmarkCheck className="size-5 text-accent" aria-hidden /> : <Bookmark className="size-5" aria-hidden />}
-      </button>
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge>{card.topic.title}</Badge>
+        <DifficultyBadge value={card.difficulty} />
+        {card.type !== "FLASHCARD" ? <Badge>{typeLabel(card.type)}</Badge> : null}
+        {!card.progress ? <Badge tone="accent">New</Badge> : card.progress.lastCorrect === false ? <Badge tone="bad">Missed last time</Badge> : due && due <= new Date() ? <Badge tone="accent">Due</Badge> : null}
+        {card.isCustom ? <Badge>Custom</Badge> : null}
+        <button type="button" onClick={onBookmark} className="ml-auto rounded-md p-1.5 text-muted hover:bg-surface-2 hover:text-text" aria-pressed={card.bookmarked} aria-label={card.bookmarked ? "Remove bookmark" : "Bookmark this question"}>
+          {card.bookmarked ? <BookmarkCheck className="size-5 text-accent" aria-hidden /> : <Bookmark className="size-5" aria-hidden />}
+        </button>
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <TeachMeLink lessonId={card.lessonId} returnTo="/flashcards" />
+        <UnfamiliarButton questionId={card.id} source="FLASHCARD" />
+      </div>
     </div>
   );
 }

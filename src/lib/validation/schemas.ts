@@ -32,6 +32,8 @@ export const quizQuestionTypeSchema = z.enum([
   "SCENARIO",
 ]);
 export const themeSchema = z.enum(["SYSTEM", "DARK", "LIGHT"]);
+export const codeLanguageSchema = z.enum(["TYPESCRIPT", "SQL", "HTTP", "BASH"]);
+export const unfamiliarSourceSchema = z.enum(["FLASHCARD", "QUIZ", "INTERVIEW"]);
 
 const email = z.string().trim().toLowerCase().max(254).email("Enter a valid email address");
 const password = z
@@ -257,6 +259,15 @@ export const lessonSchema = z.object({
   slug,
   title: z.string().trim().min(2).max(160),
   content: z.string().max(50_000),
+  summary: z.string().trim().max(300).optional(),
+  explanation: z.string().max(50_000).optional(),
+  realWorldExample: z.string().max(20_000).optional(),
+  codeExample: z.string().max(10_000).optional(),
+  codeLanguage: codeLanguageSchema.optional(),
+  commonMistakes: z.string().max(20_000).optional(),
+  level: difficultySchema.default("BEGINNER"),
+  estimatedMinutes: z.number().int().min(1).max(180).default(10),
+  published: z.boolean().default(true),
   order: z.number().int().min(0).max(1000).default(0),
 });
 
@@ -281,7 +292,36 @@ export const lessonUpdateSchema = z.object({
   slug: slug.optional(),
   title: z.string().trim().min(2).max(160).optional(),
   content: z.string().max(50_000).optional(),
+  summary: z.string().trim().max(300).nullable().optional(),
+  explanation: z.string().max(50_000).nullable().optional(),
+  realWorldExample: z.string().max(20_000).nullable().optional(),
+  codeExample: z.string().max(10_000).nullable().optional(),
+  codeLanguage: codeLanguageSchema.nullable().optional(),
+  commonMistakes: z.string().max(20_000).nullable().optional(),
+  level: difficultySchema.optional(),
+  estimatedMinutes: z.number().int().min(1).max(180).optional(),
+  published: z.boolean().optional(),
   order: z.number().int().min(0).max(1000).optional(),
+});
+
+// ───────── Learn mode ─────────
+export const lessonPrerequisiteSchema = z.object({ prerequisiteId: idSchema });
+export const lessonQuestionLinkSchema = z.object({ questionId: idSchema });
+
+export const completeLessonSchema = z.object({
+  understanding: z.number().int().min(1).max(5).optional(),
+});
+
+export const lessonPracticeAnswerSchema = z.object({
+  questionId: idSchema,
+  answer: submittedAnswerSchema,
+  responseTimeMs: z.number().int().min(0).max(24 * 60 * 60 * 1000).optional(),
+});
+
+export const markUnfamiliarSchema = z.object({
+  questionId: idSchema,
+  source: unfamiliarSourceSchema,
+  quizAttemptId: idSchema.optional(),
 });
 
 /**

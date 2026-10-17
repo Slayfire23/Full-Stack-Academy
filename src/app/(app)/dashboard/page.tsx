@@ -3,6 +3,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getCurrentUser } from "@/server/session";
 import { dashboard } from "@/server/services/analytics.service";
+import { getLessonRecommendations } from "@/server/services/learn.service";
 import { Card, EmptyState, Meter, PageHeader } from "@/components/ui/primitives";
 import { buttonClasses } from "@/components/ui/button";
 import { ActivityChart, ForecastChart } from "@/components/charts";
@@ -14,7 +15,7 @@ const pct = (v: number | null) => (v === null ? "—" : `${Math.round(v * 100)}%
 export default async function DashboardPage() {
   const user = await getCurrentUser();
   if (!user) redirect("/login");
-  const d = await dashboard(user.id);
+  const [d, lessonsToStudy] = await Promise.all([dashboard(user.id), getLessonRecommendations(user.id, 3)]);
   const rec = d.recommendation;
 
   return (
@@ -84,6 +85,23 @@ export default async function DashboardPage() {
           )}
         </Card>
       </div>
+
+      {lessonsToStudy.length > 0 ? (
+        <Card className="mt-4 p-6">
+          <h2 className="font-semibold">Lessons to study</h2>
+          <ul className="mt-3 divide-y divide-border">
+            {lessonsToStudy.map((r) => (
+              <li key={r.lessonId} className="flex flex-wrap items-center justify-between gap-3 py-2.5">
+                <div>
+                  <p className="font-medium">{r.title}</p>
+                  <p className="text-sm text-muted">{r.reason}</p>
+                </div>
+                <Link href={`/learn/${r.lessonId}`} className={buttonClasses("secondary", "sm")}>Study</Link>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      ) : null}
 
       <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Stat label="Answered" value={String(d.questionsAnswered)} />

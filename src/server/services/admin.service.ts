@@ -3,6 +3,7 @@ import type { z } from "zod";
 import { prisma } from "../db";
 import { http } from "../http";
 import { validateQuestionDraft, type QuestionDraft } from "@/lib/adaptive/question-schema";
+import { wouldCreateCycle } from "@/lib/learn/prerequisites";
 import { checkDuplicate, fingerprint, type Fingerprint } from "@/lib/adaptive/similarity";
 import { contentHash } from "@/lib/adaptive/text";
 import type {
@@ -54,13 +55,48 @@ export const topics = {
 };
 
 export const lessons = {
-  list: (topicId: string) => prisma.lesson.findMany({ where: { topicId }, orderBy: { order: "asc" } }),
+  list: (topicId: string) =>
+    prisma.lesson.findMany({
+      where: { topicId },
+      orderBy: { order: "asc" },
+      include: {
+        prerequisites: { select: { prerequisiteId: true, prerequisite: { select: { title: true } } } },
+        questions: { where: { ownerId: null }, orderBy: { createdAt: "asc" }, select: { id: true, prompt: true, type: true } },
+      },
+    }),
   create: async (data: z.output<typeof lessonSchema>) => {
     if (!(await prisma.topic.findUnique({ where: { id: data.topicId } }))) throw http.unprocessable("Unknown topic");
     return prisma.lesson.create({ data });
   },
   update: (id: string, data: z.output<typeof lessonUpdateSchema>) => prisma.lesson.update({ where: { id }, data }),
   remove: (id: string) => prisma.lesson.delete({ where: { id } }),
+
+  addPrerequisite: async (lessonId: string, prerequisiteId: string) => {
+    const edges = await prisma.lessonPrerequisite.findMany({ select: { lessonId: true, prerequisiteId: true } });
+    if (wouldCreateCycle(edges, { lessonId, prerequisiteId })) throw http.unprocessable("That would make a lesson its own prerequisite, directly or through a chain");
+    const [a, b] = await Promise.all([
+      prisma.lesson.findUnique({ where: { id: lessonId }, select: { id: true } }),
+      prisma.lesson.findUnique({ where: { id: prerequisiteId }, select: { id: true } }),
+    ]);
+    if (!a || !b) throw http.unprocessable("Unknown lesson");
+    try {
+      return await prisma.lessonPrerequisite.create({ data: { lessonId, prerequisiteId } });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") throw http.conflict("That prerequisite is already set");
+      throw err;
+    }
+  },
+  removePrerequisite: async (lessonId: string, prerequisiteId: string) => {
+    await prisma.lessonPrerequisite.deleteMany({ where: { lessonId, prerequisiteId } });
+  },
+  linkQuestion: async (lessonId: string, questionId: string) => {
+    if (!(await prisma.lesson.findUnique({ where: { id: lessonId }, select: { id: true } }))) throw http.notFound("Lesson");
+    const { count } = await prisma.question.updateMany({ where: { id: questionId, ownerId: null }, data: { lessonId } });
+    if (count === 0) throw http.notFound("Question");
+  },
+  unlinkQuestion: async (lessonId: string, questionId: string) => {
+    await prisma.question.updateMany({ where: { id: questionId, lessonId }, data: { lessonId: null } });
+  },
 };
 
 // ───────── Questions ─────────

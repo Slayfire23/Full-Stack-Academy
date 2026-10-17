@@ -1,3 +1,4 @@
+import { notFound } from "next/navigation";
 import { auth } from "@/auth";
 import { prisma } from "./db";
 import { http } from "./http";
@@ -24,6 +25,17 @@ export async function requireUser(): Promise<CurrentUser> {
 export async function requireAdmin(): Promise<CurrentUser> {
   const user = await requireUser();
   if (user.role !== "ADMIN") throw http.forbidden();
+  return user;
+}
+
+/**
+ * For admin page components specifically: 404s non-admins, same as the admin layout.
+ * Defense in depth alongside the middleware and the layout — pages render in parallel with
+ * their layout, so a page that queries the database on its own must not rely only on those.
+ */
+export async function requireAdminPage(): Promise<CurrentUser> {
+  const user = await getCurrentUser();
+  if (!user || user.role !== "ADMIN") notFound();
   return user;
 }
 

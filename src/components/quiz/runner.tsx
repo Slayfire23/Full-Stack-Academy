@@ -7,6 +7,7 @@ import { api, ApiError } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { Badge, Card, DifficultyBadge, ErrorNote, Input, Textarea, typeLabel } from "@/components/ui/primitives";
 import { CodeBlock } from "@/components/code-block";
+import { TeachMeLink, UnfamiliarButton } from "@/components/learn/actions";
 import { cn } from "@/lib/cn";
 import type { getQuizView } from "@/server/services/quiz.service";
 
@@ -103,6 +104,18 @@ export function QuizRunner({ initial }: { initial: Quiz }) {
     else if (index < quiz.questions.length - 1) setIndex(index + 1);
   }
 
+  async function markUnfamiliar() {
+    // The server grades this like any other ungraded answer; refetch so `submitted`/`result`
+    // reflect the real state instead of guessing the shape client-side.
+    try {
+      const res = await api<{ quiz: Quiz }>(`/api/quizzes/${quiz.id}`);
+      setQuiz(res.quiz);
+    } catch {
+      // The mark itself already succeeded; the view will catch up on next load.
+    }
+    if (quiz.feedbackMode === "END") goNext();
+  }
+
   const result = q.result;
   const submittedIds = (q.submitted as { optionIds?: string[] } | null)?.optionIds ?? [];
 
@@ -116,6 +129,10 @@ export function QuizRunner({ initial }: { initial: Quiz }) {
             <Badge>{q.topic.title}</Badge>
             <DifficultyBadge value={q.difficulty} />
             <Badge>{typeLabel(q.type)}</Badge>
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-3">
+            <TeachMeLink lessonId={q.lessonId} returnTo={`/quizzes/${quiz.id}`} />
+            {!q.submitted ? <UnfamiliarButton questionId={q.questionId} source="QUIZ" quizAttemptId={quiz.id} disabled={busy} onMarked={markUnfamiliar} /> : null}
           </div>
           <h2 className="mt-5 text-xl leading-snug font-medium">{q.prompt}</h2>
           {q.scenario ? <p className="mt-3 text-muted">{q.scenario}</p> : null}

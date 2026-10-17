@@ -13,3 +13,6 @@ next-env.d.ts
 !.vscode/
 .DS_Store
 Thumbs.db
+*.tmp
+.local-db-url.tmp
+SESSION_SUMMARY.md

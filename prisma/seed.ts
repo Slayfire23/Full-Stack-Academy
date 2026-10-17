@@ -43,10 +43,20 @@ async function main() {
       update: { title: t.title, description: t.description, order: i + 1 },
     });
     topicIds.set(t.slug, topic.id);
+    const structured = {
+      summary: t.lesson.summary ?? null,
+      explanation: t.lesson.explanation ?? null,
+      realWorldExample: t.lesson.realWorldExample ?? null,
+      codeExample: t.lesson.codeExample ?? null,
+      codeLanguage: t.lesson.codeLanguage ?? null,
+      commonMistakes: t.lesson.commonMistakes ?? null,
+      level: t.lesson.level ?? "BEGINNER",
+      estimatedMinutes: t.lesson.estimatedMinutes ?? 10,
+    };
     const lesson = await prisma.lesson.upsert({
       where: { topicId_slug: { topicId: topic.id, slug: t.lesson.slug } },
-      create: { topicId: topic.id, slug: t.lesson.slug, title: t.lesson.title, content: t.lesson.content, order: 1 },
-      update: { title: t.lesson.title, content: t.lesson.content },
+      create: { topicId: topic.id, slug: t.lesson.slug, title: t.lesson.title, content: t.lesson.content, order: 1, ...structured },
+      update: { title: t.lesson.title, content: t.lesson.content, ...structured },
     });
     lessonIds.set(t.slug, lesson.id);
   }

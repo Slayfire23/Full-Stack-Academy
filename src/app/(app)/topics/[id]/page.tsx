@@ -3,7 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { getCurrentUser } from "@/server/session";
 import { getTopic } from "@/server/services/content.service";
 import { HttpError } from "@/server/http";
-import { Card, PageHeader, typeLabel } from "@/components/ui/primitives";
+import { Badge, Card, DifficultyBadge, PageHeader, typeLabel } from "@/components/ui/primitives";
 import { buttonClasses } from "@/components/ui/button";
 import { Markdown } from "@/components/markdown";
 
@@ -39,8 +39,21 @@ export default async function TopicPage({ params }: { params: Promise<{ id: stri
         <div className="space-y-6">
           {topic.lessons.map((l) => (
             <article key={l.id}>
-              <h2 className="mb-3 text-xl font-semibold">{l.title}</h2>
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <h2 className="text-xl font-semibold">{l.title}</h2>
+                <DifficultyBadge value={l.level} />
+                <Badge>{l.estimatedMinutes} min</Badge>
+                {l.status === "COMPLETED" ? <Badge tone="good">Completed</Badge> : l.status === "IN_PROGRESS" ? <Badge tone="accent">In progress</Badge> : null}
+                {l.locked ? <Badge tone="neutral">Locked</Badge> : null}
+              </div>
+              {l.locked ? (
+                <p className="mb-3 text-sm text-muted">Recommended to learn {l.missingPrerequisites.map((p) => p.title).join(", ")} first.</p>
+              ) : null}
+              {l.summary ? <p className="mb-3 text-muted">{l.summary}</p> : null}
               <Markdown source={l.content} />
+              <Link href={`/learn/${l.id}`} className={buttonClasses("secondary", "sm", "mt-3")}>
+                Open lesson
+              </Link>
             </article>
           ))}
         </div>

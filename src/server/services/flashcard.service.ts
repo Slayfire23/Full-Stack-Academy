@@ -43,6 +43,7 @@ const cardSelect = {
   tags: true,
   source: true,
   ownerId: true,
+  lessonId: true,
   topic: { select: { id: true, title: true } },
 } satisfies Prisma.QuestionSelect;
 

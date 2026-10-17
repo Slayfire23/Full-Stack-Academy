@@ -50,6 +50,17 @@ Every response carries `x-request-id`; send your own (8–64 chars `[A-Za-z0-9-]
 | GET | `/api/topics/:id/lessons` | Lessons only. |
 | GET | `/api/questions?topicId&difficulty&type&q&cursor&limit` | Browse questions. **Never includes answer keys.** |
 
+## Learn Mode
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/learn/lessons/:id` | Lesson with structured fields (falls back to `content` when empty), prerequisite lock state, this user's progress, and its linked practice questions (keys hidden until answered). 404 if unpublished or not found. |
+| POST | `/api/learn/lessons/:id/view` | Marks the lesson viewed: `NOT_STARTED` → `IN_PROGRESS`, bumps `lastViewedAt`. Returns the updated progress. |
+| POST | `/api/learn/lessons/:id/complete` | `{ understanding?: 1-5 }` → marks `COMPLETED`; 422 if the lesson was never viewed. Resolves every unresolved "haven't learned this yet" mark linked to the lesson for this user; returns `{ progress, resolvedMarks }`. |
+| POST | `/api/learn/lessons/:id/practice` | `{ questionId, answer: { optionIds } \| { text }, responseTimeMs? }` — grades server-side like a quiz answer, updates the lesson's own `practiceAttempts`/`practiceCorrect`, and feeds the same per-question spaced-repetition schedule as quizzes (kind `LESSON_PRACTICE`). 404 if the question isn't linked to this lesson or isn't visible to the user. |
+| POST | `/api/learn/unfamiliar` | `{ questionId, source: FLASHCARD\|QUIZ\|INTERVIEW, quizAttemptId? }` — "I haven't learned this yet": records an ungraded outcome (never counted incorrect, no SRS lapse) and upserts an unfamiliar mark (reactivating it if it was previously resolved). Pass `quizAttemptId` when marking a quiz question — it's then excluded from that quiz's score denominator instead of counting as unanswered. Re-marking a question already answered in that quiz is a no-op (`duplicate: true`, nothing changes). |
+| GET | `/api/learn/recommendations` | Up to 5 not-yet-completed lessons ranked by unresolved unfamiliar marks, recently missed questions, low topic accuracy and unmet prerequisites, each with a plain-language `reason`. New users (no answers yet) get a single starting-point lesson instead. |
+
 ## Flashcards
 
 | Method | Path | Notes |
@@ -111,8 +122,12 @@ Every response carries `x-request-id`; send your own (8–64 chars `[A-Za-z0-9-]
 | PATCH / DELETE | `/api/admin/tracks/:id` | Only the fields you send change. Delete refuses non-empty tracks. |
 | GET / POST | `/api/admin/topics?trackId` | |
 | PATCH / DELETE | `/api/admin/topics/:id` | Delete refuses topics with questions. |
-| GET / POST | `/api/admin/lessons?topicId` | |
-| PATCH / DELETE | `/api/admin/lessons/:id` | |
+| GET / POST | `/api/admin/lessons?topicId` | Lessons include every structured field (`summary`, `explanation`, `realWorldExample`, `codeExample`/`codeLanguage`, `commonMistakes`, `level`, `estimatedMinutes`, `published`), their prerequisites and their linked practice questions. |
+| PATCH / DELETE | `/api/admin/lessons/:id` | Same structured fields, all optional on PATCH. |
+| POST | `/api/admin/lessons/:id/prerequisites` | `{ prerequisiteId }` → 201. 422 if it would make a lesson require itself, directly or through a chain; 409 if already set. |
+| DELETE | `/api/admin/lessons/:id/prerequisites/:prerequisiteId` | Remove a prerequisite (no-op if absent). |
+| POST | `/api/admin/lessons/:id/questions` | `{ questionId }` → 204. Links a bank question (`ownerId: null`) to the lesson as a practice question. |
+| DELETE | `/api/admin/lessons/:id/questions/:questionId` | Unlink (sets the question's `lessonId` to `null`; the question itself is untouched). |
 | GET / POST | `/api/admin/questions?topicId&q&cursor&limit` | Includes answer keys. Create validates and rejects near-duplicates (409). |
 | GET / PATCH / DELETE | `/api/admin/questions/:id` | PATCH takes the full question. DELETE unpublishes answered questions unless `?force=true`. |
 | POST | `/api/admin/import` | `{ trackSlug, dryRun, onExisting: skip\|update, questions: [...] }` (≤ 500, ≤ 5 MB) → per-row report: created / updated / skipped / invalid / duplicate. Valid rows are written in one transaction. |

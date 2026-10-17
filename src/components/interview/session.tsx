@@ -7,6 +7,7 @@ import { api, ApiError } from "@/lib/api-client";
 import { Button, buttonClasses } from "@/components/ui/button";
 import { Badge, Card, DifficultyBadge, ErrorNote, Textarea } from "@/components/ui/primitives";
 import { CodeBlock } from "@/components/code-block";
+import { TeachMeLink, UnfamiliarButton } from "@/components/learn/actions";
 import type { getInterview } from "@/server/services/interview.service";
 import type { InterviewEvaluation } from "@/lib/ai/evaluation";
 
@@ -128,6 +129,10 @@ function QuestionPanel({
         <div className="flex flex-wrap gap-2">
           <Badge>{item.topic.title}</Badge>
           <DifficultyBadge value={item.difficulty} />
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <TeachMeLink lessonId={item.lessonId} returnTo={`/interview/${sessionId}`} />
+          <UnfamiliarButton questionId={item.id} source="INTERVIEW" />
         </div>
         <h2 className="mt-4 text-xl leading-snug font-medium">{item.prompt}</h2>
         {item.scenario ? <p className="mt-3 text-muted">{item.scenario}</p> : null}

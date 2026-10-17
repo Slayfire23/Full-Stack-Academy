@@ -85,6 +85,7 @@ async function loadOwnedQuiz(userId: string, quizId: string) {
               codeExample: true,
               scenario: true,
               tags: true,
+              lessonId: true,
               topic: { select: { id: true, title: true } },
             },
           },
@@ -173,6 +174,7 @@ export async function getQuizView(userId: string, quizId: string) {
         codeExample: q.codeExample,
         scenario: q.scenario,
         tags: q.tags,
+        lessonId: q.lessonId,
         ...publicPayload(q.answerData as unknown as AnswerData, slot.optionOrder),
         submitted: attempt ? attempt.submittedAnswer : null,
         result: showResult ? reveal(slot, attempt) : null,
@@ -282,12 +284,21 @@ export async function finishQuiz(userId: string, quizId: string) {
     if (locked.length === 0) throw http.notFound("Quiz");
     const quiz = await tx.quizAttempt.findUniqueOrThrow({
       where: { id: quizId },
-      include: { questions: { select: { question: { select: { type: true } } } } },
+      include: {
+        questions: { select: { questionId: true, question: { select: { type: true } } } },
+        attempts: { select: { questionId: true, correct: true } },
+      },
     });
     if (quiz.status !== "IN_PROGRESS") return { id: quiz.id, status: quiz.status, score: quiz.score };
 
+    const correctByQuestion = new Map(quiz.attempts.map((a) => [a.questionId, a.correct]));
     // Unanswered objective questions count as incorrect; open-ended ones never affect the score.
-    const objectiveTotal = quiz.questions.filter((s) => OBJECTIVE.includes(s.question.type)).length;
+    // A question answered but explicitly ungraded (correct === null — "I haven't learned this
+    // yet", or any other ungraded outcome) is excluded from the denominator entirely, since it
+    // was never objectively judged at all — it is neither right nor wrong.
+    const objectiveTotal = quiz.questions.filter(
+      (s) => OBJECTIVE.includes(s.question.type) && correctByQuestion.get(s.questionId) !== null,
+    ).length;
     const score = objectiveTotal > 0 ? Math.round((quiz.correctCount / objectiveTotal) * 1000) / 10 : null;
     const done = await tx.quizAttempt.update({
       where: { id: quizId },
@@ -304,6 +315,9 @@ export async function getResults(userId: string, quizId: string) {
   const byTopic = new Map<string, { topicId: string; title: string; total: number; correct: number }>();
   for (const q of view.questions) {
     if (!OBJECTIVE.includes(q.type as QuestionType)) continue;
+    // Answered but explicitly ungraded (e.g. "I haven't learned this yet") — excluded entirely,
+    // not counted as wrong. An unanswered question (submitted === null) still counts as incorrect.
+    if (q.submitted !== null && q.result?.correct === null) continue;
     const t = byTopic.get(q.topic.id) ?? { topicId: q.topic.id, title: q.topic.title, total: 0, correct: 0 };
     t.total++;
     if (q.result?.correct) t.correct++;

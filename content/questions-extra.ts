@@ -10,6 +10,11 @@ export const questionsExtra: SeedQuestion[] = [
     "Cache-Control carries directives such as max-age=600, no-store, private and public. Expires is an older header with a fixed date; when both are present, Cache-Control's max-age wins.",
     { tags: ["caching", "headers"] }),
 
+  mc("http", "http-009", B, "A client sends `If-None-Match` with the ETag it was given on an earlier request for the same resource, and the resource has not changed. What should the server return?",
+    ["304 Not Modified, with no body", "200 OK, with the full body again", "412 Precondition Failed", "204 No Content"], 0,
+    "304 Not Modified tells the client its cached copy is still valid, so it can keep using it — saving the bandwidth and time of sending the body again. 412 is for conditional *writes* (If-Match) that fail; it does not apply to a matching If-None-Match on a read.",
+    { tags: ["caching", "headers"] }),
+
   mc("node-async", "node-007", A, "A handler runs `await Promise.all(rows.map((r) => saveRow(r)))` for 10,000 rows, where each saveRow performs a database query. What is the likely problem?",
     ["All 10,000 queries start at once, exhausting the connection pool or overwhelming the database; process them with a concurrency limit or in batches", "Promise.all runs them one at a time, so it is slow", "Promise.all silently ignores rejected promises", "Node.js limits Promise.all to 1,000 promises"], 0,
     "Promise.all does not limit concurrency: every call starts immediately. Queries then queue for a small pool of connections, time out, or overload the database. Use batched inserts (createMany) or a small concurrency limit.",

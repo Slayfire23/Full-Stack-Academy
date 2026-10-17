@@ -2,9 +2,11 @@
 
 An interview-prep platform: spaced-repetition flashcards, adaptive quizzes, written interview scenarios, progress analytics and an admin area — built with Next.js, TypeScript, PostgreSQL and Prisma.
 
-The **Backend Development** track is live today: 22 topics, 22 lessons and **168 questions** (90 flashcards, 45 objective quiz questions, 33 scenarios). **Frontend Development**, **Full-Stack Development**, **DevOps and Cloud** and **System Design** are listed in the curriculum as "coming soon" — their tracks exist in the schema and seed data, but have no published topics yet.
+The **Backend Development** track is live today: 22 topics, 22 lessons and **169 questions** (90 flashcards, 46 objective quiz questions, 33 scenarios). **Frontend Development**, **Full-Stack Development**, **DevOps and Cloud** and **System Design** are listed in the curriculum as "coming soon" — their tracks exist in the schema and seed data, but have no published topics yet.
 
 Every quiz is assembled fresh for you. Questions and answer order are shuffled per quiz, questions you answered recently are held back while alternatives exist, questions you got wrong come back first, and every answer feeds a per-user spaced-repetition schedule. You choose between **New questions**, **Review weak topics** and **Mixed practice**. When an OpenAI-compatible API key is configured, the app can also generate question variations and new interview scenarios — validated and de-duplicated before they can enter the question bank. Without a key, everything else works.
+
+**Learn Mode** connects studying back to teaching: every flashcard, quiz question and interview scenario can say "Teach me this concept" (opens its lesson) or "I haven't learned this yet" (never counted wrong, excluded from the quiz score, and resolved once you complete the lesson). Lessons have a summary, explanation, a real-world example, a code example and common mistakes, plus their own practice questions and a prerequisite chain; the dashboard recommends what to study next from your own unfamiliar marks, recent misses and weak topics. The **HTTP Fundamentals and Status Codes** lesson is fully written; the rest of the Backend Development track's 22 topics get their structured lesson content in later batches.
 
 > **Read [TESTING.md](TESTING.md) before relying on this build.** It lists exactly what has been verified and what still needs its first run in your setup.
 
@@ -12,21 +14,21 @@ Every quiz is assembled fresh for you. Questions and answer order are shuffled p
 
 ## Project status
 
-Verified on the developer's Windows machine against a real Supabase Postgres database (see [TESTING.md](TESTING.md) for the full log).
+Verified on the developer's Windows machine. The app database (`npm install`, `db:deploy`, `db:seed`, `npm run dev`) runs against a real Supabase Postgres database; everything else below runs only against the local Docker database (see [TESTING.md](TESTING.md) for the full log — Learn Mode's migration has not yet been applied to Supabase).
 
 | Area | Status |
 | --- | --- |
 | `npm install` | Done |
-| `npm run db:deploy` (migrations, against Supabase) | Done |
+| `npm run db:deploy` (migrations, against Supabase) | Done — **not yet including the Learn Mode migration** |
 | `npm run db:seed` (against Supabase) | Done |
 | `npm run dev` | Done — serves the dashboard |
-| Unit tests (`npm run test:core`) | Passing — 126 tests |
-| SQL constraint tests (`npm run test:db`) | Passing — 27 checks |
-| `npm run typecheck` | Not yet run |
-| `npm run lint` | Not yet run |
-| Integration tests (`npm test`) | Not yet run |
-| `npm run build` | Not yet run |
-| End-to-end tests (`npm run test:e2e`) | Not yet run |
+| `npm run typecheck` | Passing — 0 errors |
+| `npm run lint` | Passing — 0 errors |
+| Unit tests (`npm run test:core`) | Passing — 147 tests |
+| Integration tests (`npm test`, local Docker DB) | Passing — 173 tests |
+| SQL constraint tests (`npm run test:db`, local Docker DB) | Passing — 38 checks |
+| `npm run build` | Passing |
+| End-to-end tests (`npm run test:e2e`, local Docker DB) | 13–14 of 14 pass per run (desktop + mobile) — one intermittent, pre-existing issue still open; see TESTING.md |
 | Deployment | Not deployed |
 
 ## Contents
@@ -49,13 +51,14 @@ Verified on the developer's Windows machine against a real Supabase Postgres dat
 
 | Area | Highlights |
 | --- | --- |
-| Curriculum | Backend Development track live: 22 topics, 22 lessons, **168 questions** (90 flashcards, 45 objective quiz questions, 33 scenarios). Frontend, Full-Stack, DevOps and Cloud, and System Design are coming soon. |
+| Curriculum | Backend Development track live: 22 topics, 22 lessons, **169 questions** (90 flashcards, 46 objective quiz questions, 33 scenarios). Frontend, Full-Stack, DevOps and Cloud, and System Design are coming soon. |
 | Flashcards | Flip, rate Again / Hard / Good / Easy (buttons show the real next interval), bookmarks, filters, "questions I got wrong", resumable sessions, private custom cards. |
 | Quizzes | Multiple choice, select-all, short answer, code reading, scenarios. Practice or test feedback, optional timer, server-side grading, retry missed questions. |
 | Adaptive engine | Seeded randomisation, recency avoidance, mistake prioritisation, spaced repetition, topic-weakness detection, topic diversity caps — all per user. |
 | Interviews | Written answers, model answer revealed after you commit, rubric self-assessment, keyword hints, optional AI feedback (clearly labelled). |
 | Analytics | Accuracy, streak (in your time zone), study time, topic strengths and weaknesses, 30-day activity, 14-day review forecast, next-topic recommendation. Empty states for new users — nothing is invented. |
-| Admin | Question editor, validated JSON import with dry run, AI draft review queue, curriculum and lesson editing. |
+| Learn Mode | "Teach me this concept" from any flashcard, quiz question or interview scenario; "I haven't learned this yet" (never wrong, excluded from the score, resolved on completion); lessons with a real-world example, code example and common mistakes; prerequisite locking; a dashboard "Lessons to study" card ranked by your own signals. |
+| Admin | Question editor, validated JSON import with dry run, AI draft review queue, curriculum and lesson editing (including prerequisites and linked practice questions). |
 
 ## Tech stack
 
@@ -102,7 +105,7 @@ Open `.env` and paste the printed value into `AUTH_SECRET`. Change `SEED_ADMIN_E
 
 Set `DATABASE_URL` to your **Supabase** project's connection string (Supabase dashboard → Project Settings → Database → Connection string). This is the app's real database — treat it like production data, not a scratch database.
 
-Leave `DATABASE_URL_TEST` pointed at the **local Docker database** (`localhost:5432`, started in the next step). Never point `DATABASE_URL_TEST` at Supabase: it is wiped by integration and constraint tests.
+Leave `DATABASE_URL_TEST` pointed at the **local Docker database** (`localhost:5434`, started in the next step). Never point `DATABASE_URL_TEST` at Supabase: it is wiped by integration and constraint tests.
 
 ### 4. Start the local test database
 
@@ -112,7 +115,7 @@ Only needed for `test:db`, `test` (integration) and `db:test:migrate`; the app i
 npm run db:up
 ```
 
-This starts PostgreSQL 16 on `localhost:5432` and, on first start, creates `full_stack_academy_test` and `full_stack_academy_shadow`.
+This starts PostgreSQL 16 on `localhost:5434` (not the default 5432 — chosen to avoid colliding with a native PostgreSQL install on the same machine; see docker-compose.yml) and, on first start, creates `full_stack_academy_test` and `full_stack_academy_shadow`.
 
 ### 5. Create the schema and load the questions (on Supabase)
 
@@ -157,18 +160,19 @@ All variables are documented in [`.env.example`](.env.example).
 | `AI_BASE_URL`, `AI_MODEL` | no | Any OpenAI-compatible Chat Completions endpoint. |
 | `AI_AUTO_PUBLISH` | no | `true` publishes AI drafts that pass every automated check; default `false` requires admin approval. |
 | `AI_GENERATION_HOURLY_LIMIT` | no | Generation requests per user per hour (default 20). |
+| `REGISTER_RATE_LIMIT_PER_HOUR` | no | Registrations allowed per IP per hour (default **5**). Anti-abuse, not a usage cap — keep it low in production. Playwright's own `webServer` raises it for the e2e suite only; never raise it anywhere else. |
 
 ## Running the tests
 
 | Command | Needs | What it runs |
 | --- | --- | --- |
-| `npm run test:core` | Node only | 126 unit tests of the adaptive engine, scheduling, grading, validation, dedupe, AI pipeline and question bank. Does not touch any database. |
+| `npm run test:core` | Node only | 147 unit tests of the adaptive engine, scheduling, grading, validation, dedupe, AI pipeline, question bank and Learn Mode's pure logic (progress, prerequisites, unfamiliar marks, recommendations). Does not touch any database. |
 | `npm run content:check` | Node | Validates every seed question, answer key and rubric, and checks for near-duplicates. Does not touch any database. |
 | `npm run typecheck` | `npm install` | TypeScript across the whole project. |
 | `npm run lint` | `npm install` | ESLint (Next.js rules). |
-| `npm test` | `npm install`; local Docker DB | Vitest: all unit tests plus integration tests against `DATABASE_URL_TEST` — **never run this against Supabase.** |
-| `npm run test:db` | local Docker DB | SQL tests proving the database constraints (27 checks) against `DATABASE_URL_TEST`. Set `PSQL=local` to use a local `psql`. |
-| `npm run test:e2e` | built app + seeded DB | Playwright: sign-in redirects, flashcards with resume, all three quiz modes, interview without AI, admin protection — on desktop and mobile viewports. |
+| `npm test` | `npm install`; local Docker DB | Vitest: all unit tests plus integration tests against `DATABASE_URL_TEST` (173 tests, including Learn Mode's lesson/prerequisite/unfamiliar-mark flows) — **never run this against Supabase.** |
+| `npm run test:db` | local Docker DB | SQL tests proving the database constraints (38 checks) against `DATABASE_URL_TEST`. Set `PSQL=local` to use a local `psql`. |
+| `npm run test:e2e` | built app + seeded DB | Playwright: sign-in redirects, flashcards with resume, all three quiz modes, interview without AI, admin protection, and the Learn Mode flow (unfamiliar → recommended → teach-me → practice → complete) — on desktop and mobile viewports. Builds and runs the app via `npm run start`, which must be the **standalone** server (see Troubleshooting) — set `DATABASE_URL` to the local Docker database first, never Supabase. |
 
 First-time setup for the local test database and browser tests:
 
@@ -187,7 +191,7 @@ npm run test:e2e
 | Command | Description |
 | --- | --- |
 | `npm run dev` | Development server on port 3000. |
-| `npm run build` / `npm start` | Production build / serve it. |
+| `npm run build` / `npm start` | Production build / serve it. `npm start` runs `scripts/start-standalone.mjs`, not `next start` directly — see Troubleshooting. |
 | `npm run db:studio` | Browse the database in Prisma Studio — points at whatever `DATABASE_URL` is set to; double-check before editing data. |
 | `npm run db:migrate` | **Never run against Supabase.** Creates and applies a new migration from local schema changes (`prisma migrate dev`); only safe against a disposable local/test database. |
 | `npm run db:reset` | **Never run against Supabase.** Drops and recreates the target database, then re-seeds. **Deletes all data.** Only ever point this at `DATABASE_URL_TEST`. |
@@ -206,14 +210,15 @@ Every generated question passes structural validation, an answer-key consistency
 ## Project structure
 
 ```
-content/          Curriculum, lessons and the 168-question bank (seed data)
+content/          Curriculum, lessons and the 169-question bank (seed data)
 prisma/           schema.prisma, migrations, seed script
 src/app/          Next.js App Router: (auth), (app) dashboard/curriculum/flashcards/quizzes/interviews/
-                  review-queue/progress/settings/admin route groups, and API routes
-src/components/   Shared UI (shell/nav, forms, cards, etc.)
-src/lib/          Adaptive engine (selection, SRS, grading, validation, dedupe), AI client, validation schemas
-src/server/       Services (quiz, flashcards, interviews, generation, analytics, admin) and the HTTP wrapper
-scripts/          Content checks, core-test runner, DB constraint test runner, SQL seed
+                  learn/review-queue/progress/settings/admin route groups, and API routes (incl. /api/learn)
+src/components/   Shared UI (shell/nav, forms, cards, learn/, etc.)
+src/lib/          Adaptive engine (selection, SRS, grading, validation, dedupe), AI client, Learn Mode's
+                  pure logic (learn/progress, prerequisites, unfamiliar, recommendations), validation schemas
+src/server/       Services (quiz, flashcards, interviews, generation, analytics, admin, learn) and the HTTP wrapper
+scripts/          Content checks, core-test runner, DB constraint test runner, SQL seed, standalone server start
 tests/            Vitest unit/integration tests, Playwright e2e specs, SQL constraint tests
 docker/           init-test-db.sql — creates the local test/shadow databases on first container start
 ```
@@ -235,6 +240,8 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for Vercel + managed PostgreSQL and for the D
 | Integration tests are skipped | Set `DATABASE_URL_TEST` to the local Docker database (not Supabase) and run `npm run db:test:migrate`. |
 | PowerShell blocks `npm` scripts | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once. |
 | Garbled characters like `â€”` instead of an em dash in a doc or source file | A text edit was saved with the wrong encoding (commonly from piping through `Get-Content`/`Set-Content` in PowerShell). Re-save the file as UTF-8 without a BOM; don't edit text files through PowerShell's `Get-Content`/`Set-Content` cmdlets. |
+| `npm start` / `test:e2e`'s built-in server warns `"next start" does not work with "output: standalone"` or serves a page missing its styles | `next.config.ts` sets `output: "standalone"` (needed for the Docker image), which plain `next start` cannot serve correctly. `npm run start` now runs `scripts/start-standalone.mjs` instead, which copies the static assets next to the standalone server first, then starts it — the same thing the Dockerfile does. Run `npm run build` again if you still see this after pulling changes. |
+| Port 5432 already in use when running `npm run db:up` | A native PostgreSQL install on the same machine is likely already bound to it. This project's `docker-compose.yml` uses **5434** for exactly this reason — check nothing else is also using that port. |
 
 ## Documentation map
 

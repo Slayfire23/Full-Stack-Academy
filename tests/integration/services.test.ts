@@ -132,7 +132,9 @@ describe.skipIf(!hasDb)("integration: adaptive selection with persisted history"
     const b = await createUser();
     await updateSettings(a.id, { recentWindowHours: 0 });
     const missed = await questionByKey("http-005");
-    const { quizId } = await createQuiz(a.id, { mode: "NEW", topicIds: [topicIds.http!], count: 3, feedbackMode: "IMMEDIATE" });
+    // count is above the http topic's objective-question pool size, so every candidate
+    // (including `missed`) is selected deterministically — never a random subset.
+    const { quizId } = await createQuiz(a.id, { mode: "NEW", topicIds: [topicIds.http!], count: 20, feedbackMode: "IMMEDIATE" });
     await submitAnswer(a.id, quizId, { questionId: missed.id, answer: wrongAnswer(missed.answerData as unknown as AnswerData) });
 
     const weak = await createQuiz(a.id, { mode: "WEAK", topicIds: [topicIds.http!], count: 1, feedbackMode: "IMMEDIATE" });

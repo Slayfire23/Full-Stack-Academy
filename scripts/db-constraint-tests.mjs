@@ -7,9 +7,12 @@ import { loadEnv } from "./env.mjs";
 
 loadEnv();
 const sql = readFileSync("tests/db/constraints.sql");
+// psql's URI parser rejects Prisma-only query params (e.g. ?schema=public) with
+// "invalid URI query parameter", so they're stripped before being passed to a real psql.
+const localUrl = (process.env.DATABASE_URL_TEST ?? "").replace(/\?.*$/, "");
 const args =
   process.env.PSQL === "local"
-    ? ["psql", [process.env.DATABASE_URL_TEST ?? "", "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"]]
+    ? ["psql", [localUrl, "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"]]
     : ["docker", ["compose", "exec", "-T", "db", "psql", "-U", "postgres", "-d", "full_stack_academy_test", "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"]];
 const r = spawnSync(args[0], args[1], { input: sql, encoding: "utf8", shell: process.platform === "win32" });
 const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;

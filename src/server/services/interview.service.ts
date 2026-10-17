@@ -82,6 +82,7 @@ export async function getInterview(userId: string, sessionId: string) {
       explanation: true,
       answer: true,
       answerData: true,
+      lessonId: true,
       topic: { select: { id: true, title: true } },
     },
   });
@@ -100,7 +101,7 @@ export async function getInterview(userId: string, sessionId: string) {
       .map((q) => {
         const r = responses.get(q.id);
         const ad = q.answerData as unknown as AnswerData;
-        const base = { id: q.id, prompt: q.prompt, scenario: q.scenario, codeExample: q.codeExample, difficulty: q.difficulty, topic: q.topic };
+        const base = { id: q.id, prompt: q.prompt, scenario: q.scenario, codeExample: q.codeExample, difficulty: q.difficulty, topic: q.topic, lessonId: q.lessonId };
         if (!r) return { ...base, response: null, reveal: null };
         // The model answer and rubric are revealed only after the learner has committed an answer.
         return {

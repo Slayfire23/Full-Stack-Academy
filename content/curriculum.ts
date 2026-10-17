@@ -3,11 +3,29 @@
  * Lesson content is Markdown (rendered as plain paragraphs, lists and code blocks).
  */
 
+export type SeedCodeLanguage = "TYPESCRIPT" | "SQL" | "HTTP" | "BASH";
+export type SeedDifficulty = "BEGINNER" | "INTERMEDIATE" | "ADVANCED";
+
+export interface SeedLesson {
+  slug: string;
+  title: string;
+  /** Legacy plain content. Kept non-empty even once the structured fields below are filled in. */
+  content: string;
+  summary?: string;
+  explanation?: string;
+  realWorldExample?: string;
+  codeExample?: string;
+  codeLanguage?: SeedCodeLanguage;
+  commonMistakes?: string;
+  level?: SeedDifficulty;
+  estimatedMinutes?: number;
+}
+
 export interface SeedTopic {
   slug: string;
   title: string;
   description: string;
-  lesson: { slug: string; title: string; content: string };
+  lesson: SeedLesson;
 }
 
 export interface SeedTrack {
@@ -33,8 +51,18 @@ const t = (slug: string, title: string, description: string, content: string): S
   lesson: { slug: "essentials", title: `${title}: essentials`, content: content.trim() },
 });
 
-const topics: SeedTopic[] = [
-  t("http", "HTTP fundamentals and status codes", "Methods, statelessness, headers and what each status code family tells the client.", `
+const httpTopic: SeedTopic = {
+  slug: "http",
+  title: "HTTP fundamentals and status codes",
+  description: "Methods, statelessness, headers and what each status code family tells the client.",
+  lesson: {
+    slug: "essentials",
+    title: "HTTP fundamentals and status codes: essentials",
+    level: "BEGINNER",
+    estimatedMinutes: 15,
+    summary:
+      "Every request carries a method and headers; every response carries a status code that tells the caller exactly what happened and what to do next.",
+    content: `
 HTTP is a stateless request/response protocol. Every request carries a **method**, a **path**, **headers** and an optional **body**; every response carries a **status code**, headers and an optional body.
 
 **Methods.** GET reads, POST creates or triggers processing, PUT replaces, PATCH partially updates, DELETE removes. *Safe* methods (GET, HEAD, OPTIONS) do not change state; *idempotent* methods (the safe ones plus PUT and DELETE) can be repeated with the same effect, which is why clients may retry them.
@@ -46,7 +74,149 @@ HTTP is a stateless request/response protocol. Every request carries a **method*
 - 5xx server error — 500 unexpected, 502 bad upstream response, 503 unavailable, 504 upstream timeout
 
 **Debugging habit.** Status codes tell you *where* to look: 4xx means the request (or the caller's permissions), 502/504 point past the proxy at your app, 500 points at your code.
-`),
+`.trim(),
+    explanation: `
+## Requests and responses
+
+Every HTTP exchange is one **request** (method, path, headers, optional body) answered by one **response** (status code, headers, optional body). HTTP itself is **stateless**: the server does not remember anything between requests just because they arrived on the same connection. Applications simulate "being logged in" by sending an identifier back on every request — a session cookie or a bearer token — which the server looks up each time.
+
+## Methods: safe vs idempotent
+
+- **Safe** methods (GET, HEAD, OPTIONS) never change server state, so they are safe to prefetch, cache and retry freely.
+- **Idempotent** methods (the safe ones, plus PUT and DELETE) may change state, but repeating the exact same request has the same effect as doing it once — a client, or a retrying proxy, can safely resend them after a timeout.
+- POST and PATCH are neither. Resending a timed-out POST can create a second order; a client that is not sure whether its request arrived should use an idempotency key rather than just retrying.
+
+## Status code families
+
+The first digit tells you which family applies, which narrows down where to look before you dig any further:
+
+- **2xx — success.** 200 OK (a body is returned), 201 Created (a new resource now exists — include a \`Location\` header pointing at it), 204 No Content (succeeded, nothing to return — a typical DELETE response).
+- **3xx — redirection.** 301/308 move permanently; 302/307 move temporarily; 304 Not Modified means "your cached copy is still good" (see ETags, below).
+- **4xx — client error.** The request itself, or the caller's credentials or permissions, is the problem: 400 malformed syntax, 401 not authenticated, 403 authenticated but not allowed, 404 not found (or hidden on purpose, to avoid leaking that a resource exists), 409 conflicts with the resource's current state, 422 well-formed but semantically invalid, 429 too many requests.
+- **5xx — server error.** The problem is on your side, or on an upstream you depend on: 500 unexpected/unhandled, 502 a bad response from an upstream server, 503 temporarily unavailable (overloaded or in maintenance), 504 an upstream took too long to respond.
+
+This is also a debugging habit worth building: 4xx points at the request or the caller; 502/504 point *past* your app at something upstream (a proxy, another service, a timeout); 500 points at your own code.
+
+## Caching with Cache-Control
+
+\`Cache-Control\` tells caches — the browser, a CDN, a shared proxy — whether and how long they may reuse a response without asking again:
+
+- \`max-age=600\` — reusable for 600 seconds.
+- \`no-cache\` — may be cached, but must be revalidated with the origin before each reuse (not "don't cache", despite the name).
+- \`no-store\` — never cache this at all, anywhere. Use it for anything containing personal data that passes through a cache other users might share.
+- \`private\` — only a single user's own browser may cache it. \`public\` — shared caches (CDNs, proxies) may cache it too. **Never let personal data get \`public\` caching** — a shared cache serving it to the next visitor is a real data leak, not a hypothetical one.
+- \`s-maxage\` — like \`max-age\`, but only for shared caches; lets a CDN cache a response longer than an individual browser would.
+
+**ETags and revalidation.** A server can tag a response with an \`ETag\` (an opaque version identifier). Next time, the client sends it back as \`If-None-Match\`; if it still matches, the server replies \`304 Not Modified\` with no body, confirming the client's cached copy is still correct — cheaper than re-sending the whole response.
+
+## 429 and rate limiting, briefly
+
+\`429 Too Many Requests\` tells a client it has exceeded a quota, usually with a \`Retry-After\` header (seconds, or an HTTP date) saying how long to back off. Two common ways to enforce a limit: a **fixed window** (e.g. "100 per calendar minute" — simple, but allows a burst right at the boundary between two windows) and a **token bucket** (tokens refill steadily and each request spends one, smoothing bursts out). Limits are usually keyed **per user or API key**, not just per IP address — many legitimate users can share one IP (an office network, a mobile carrier's NAT), and one determined client can rotate IPs. Across more than one server instance, an in-memory counter is only exact per instance; a shared store (Redis, or a database row) is needed to enforce the limit correctly across all of them. (The "Rate limiting" topic goes deeper into choosing and implementing a strategy.)
+`.trim(),
+    realWorldExample: `
+Consider a small orders API: \`POST /orders\` creates an order, \`GET /orders/:id\` reads one back.
+
+**Creating an order:**
+\`\`\`http
+POST /orders HTTP/1.1
+Host: api.example.com
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{"productId": "sku_42", "quantity": 2}
+\`\`\`
+A successful create returns 201 with a \`Location\` header and the new resource:
+\`\`\`http
+HTTP/1.1 201 Created
+Location: /orders/9f1c2a
+Content-Type: application/json
+
+{"id": "9f1c2a", "productId": "sku_42", "quantity": 2, "status": "PENDING"}
+\`\`\`
+
+**Reading it back, with caching.** An order is personal data, so it is cached per-user at most, and revalidated cheaply:
+\`\`\`http
+GET /orders/9f1c2a HTTP/1.1
+Authorization: Bearer <token>
+If-None-Match: "a1b2c3"
+\`\`\`
+If nothing has changed since ETag \`"a1b2c3"\` was issued, the server does not resend the body:
+\`\`\`http
+HTTP/1.1 304 Not Modified
+\`\`\`
+
+**Ordering too fast.** If this user has placed too many orders this minute:
+\`\`\`http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 30
+\`\`\`
+A well-behaved client waits at least 30 seconds before trying again — retrying immediately only adds to the load that triggered the 429.
+
+**Something is wrong upstream.** If the orders API depends on a payments service that is down:
+\`\`\`http
+HTTP/1.1 502 Bad Gateway
+\`\`\`
+That status code alone tells you to go look at the payments service, not at the orders API's own code.
+`.trim(),
+    codeExample: `
+import { NextResponse } from "next/server";
+
+// POST /api/orders — create an order. POST is neither safe nor idempotent, so a client
+// that is unsure whether its request arrived should retry with an idempotency key,
+// not by resending blindly.
+export async function POST(req: Request) {
+  const body = await req.json().catch(() => null);
+  if (!body || typeof body.productId !== "string" || typeof body.quantity !== "number") {
+    return NextResponse.json({ error: "productId and quantity are required" }, { status: 400 });
+  }
+  if (body.quantity <= 0) {
+    return NextResponse.json({ error: "quantity must be positive" }, { status: 422 });
+  }
+
+  const allowed = await checkRateLimit(req); // per user/API key, backed by a shared store
+  if (!allowed.ok) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(allowed.retryAfterSeconds) } },
+    );
+  }
+
+  const order = await createOrder(body);
+  return NextResponse.json(order, {
+    status: 201,
+    headers: { Location: \`/orders/\${order.id}\` },
+  });
+}
+
+// GET /api/orders/:id — safe, idempotent, and cacheable per user only.
+// Never "public": an order is personal data.
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const order = await findOrder(id);
+  if (!order) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+  if (req.headers.get("if-none-match") === order.etag) {
+    return new NextResponse(null, { status: 304 });
+  }
+  return NextResponse.json(order, {
+    headers: { "Cache-Control": "private, max-age=60", ETag: order.etag },
+  });
+}
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Returning 200 for everything, with the real result buried in the body.** Clients — and infrastructure like load balancers, monitoring and caches — rely on the status code; burying "actually it failed" inside a 200 body breaks all of that.
+- **Caching personal data as \`public\`.** A shared cache (a CDN, a corporate proxy) that serves one user's cached order history to the next visitor is a real data leak, not a hypothetical one. Personal responses should be \`private\` at most, and often \`no-store\`.
+- **Treating POST as safe to retry blindly.** POST is neither safe nor idempotent; retrying a timed-out POST without an idempotency key can create a duplicate order. Use an idempotency key — a client-generated id the server deduplicates on — for any POST that must not double-apply.
+- **Confusing \`no-cache\` with \`no-store\`.** \`no-cache\` still allows caching — it just requires revalidation first. If the intent is "never store this anywhere", use \`no-store\` instead.
+- **Ignoring \`Retry-After\` and retrying a 429 or 503 immediately.** That just adds to the load that caused the response in the first place; back off for at least the given duration.
+- **Returning 500 for problems that are really 4xx.** A malformed request body or an unauthenticated caller is not a server bug — returning 500 for it hides real server errors in monitoring and wrongly suggests to the caller that retrying later might help.
+`.trim(),
+  },
+};
+
+const topics: SeedTopic[] = [
+  httpTopic,
   t("rest", "REST APIs and CRUD operations", "Resource modelling, method semantics, status codes and API design conventions.", `
 REST models a system as **resources** identified by URLs and manipulated with standard HTTP methods.
 

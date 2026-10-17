@@ -14,22 +14,41 @@ export async function resetDb() {
   }
 }
 
-/** Minimal curriculum: the backend track, a few topics and their seed questions. */
+/** Minimal curriculum: the backend track, a few topics, their lesson and seed questions. */
 export async function seedContent(topicSlugs = ["http", "idempotency", "concurrency"]) {
   const track = await prisma.learningTrack.create({
     data: { slug: "backend", title: "Backend Development", description: "x", published: true, order: 1 },
   });
   const topicIds: Record<string, string> = {};
+  const lessonIds: Record<string, string> = {};
   for (const [i, slug] of topicSlugs.entries()) {
     const t = curriculum.topics.find((x) => x.slug === slug)!;
     const topic = await prisma.topic.create({ data: { trackId: track.id, slug, title: t.title, description: t.description, order: i } });
     topicIds[slug] = topic.id;
+    const lesson = await prisma.lesson.create({
+      data: {
+        topicId: topic.id,
+        slug: t.lesson.slug,
+        title: t.lesson.title,
+        content: t.lesson.content,
+        summary: t.lesson.summary ?? null,
+        explanation: t.lesson.explanation ?? null,
+        realWorldExample: t.lesson.realWorldExample ?? null,
+        codeExample: t.lesson.codeExample ?? null,
+        codeLanguage: t.lesson.codeLanguage ?? null,
+        commonMistakes: t.lesson.commonMistakes ?? null,
+        level: t.lesson.level ?? "BEGINNER",
+        estimatedMinutes: t.lesson.estimatedMinutes ?? 10,
+      },
+    });
+    lessonIds[slug] = lesson.id;
   }
   for (const q of allQuestions.filter((x) => topicSlugs.includes(x.topic))) {
     await prisma.question.create({
       data: {
         externalKey: q.externalKey,
         topicId: topicIds[q.topic]!,
+        lessonId: lessonIds[q.topic] ?? null,
         type: q.type,
         difficulty: q.difficulty,
         prompt: q.prompt,
@@ -42,7 +61,7 @@ export async function seedContent(topicSlugs = ["http", "idempotency", "concurre
       },
     });
   }
-  return { trackId: track.id, topicIds };
+  return { trackId: track.id, topicIds, lessonIds };
 }
 
 let n = 0;

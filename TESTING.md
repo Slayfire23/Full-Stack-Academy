@@ -19,6 +19,30 @@ Run separately from the sandbox above, against a real **Supabase** Postgres data
 
 Not yet run on this machine: `npm run typecheck`, `npm run lint`, `npm test` (integration), `npm run build`, `npm run test:e2e`. See [README.md](README.md#project-status) for the current status table.
 
+## Learn Mode verification (2026-10-17, local Docker database — not yet applied to Supabase)
+
+Learn Mode's schema, services, API, UI and content were built and verified entirely against the local Docker database (`DATABASE_URL_TEST`/`DATABASE_URL` both pointed at `localhost:5434`). The migration has been reviewed and approved but has **not** been applied to Supabase, committed, or pushed.
+
+| What | Result |
+| --- | --- |
+| `npm run typecheck` | 0 errors |
+| `npm run lint` | 0 errors |
+| `npm run test:core` | 147 unit tests passed (126 original + 21 new: lesson progress, prerequisite cycles/locking/ordering, unfamiliar-mark semantics, recommendation ranking) |
+| `npm run content:check` | 169 questions (90 flashcards, 46 objective, 33 scenarios), 0 failures, 0 near-duplicates |
+| `npm run test:db` | 38 checks passed (27 original + 11 new: prerequisite self-reference, understanding range, practice-counter sanity, unfamiliar-mark uniqueness, lesson-related cascades) |
+| `npm test` (integration) | 173 tests passed (142 original + more than 10 new, incl. two added on review: re-marking a resolved unfamiliar mark reactivates it; marking unfamiliar after already answering a quiz question is a no-op) |
+| `npm run build` | Succeeds |
+| `npm run test:e2e` (desktop + mobile, local Docker DB) | 13–14 of 14 pass per run across 6 runs. The admin-protection test passed in **every** run after the middleware fix below. The remaining, intermittent failure is a separate, newly-found issue — see below. |
+
+Real bugs found and fixed during this work (none were pre-existing *known* issues — all newly discovered while verifying Learn Mode end to end):
+
+- `next start` cannot serve a Next.js app built with `output: "standalone"` — it warned and served pages missing their static assets. This is why `test:e2e` had apparently never been run successfully before. Fixed by making `npm start` run `scripts/start-standalone.mjs` (copies static assets next to the standalone server, mirroring the Dockerfile, then starts it).
+- `finishQuiz`/`getResults` only excluded "I haven't learned this yet" answers from the *correct* count, not from the score's denominator — which would have silently lowered scores for using the feature as designed. Fixed in `src/server/services/quiz.service.ts`.
+- `/admin/**` and `/tracks` queried the database with no per-page auth check during `next build`'s static-generation pass (no session exists then), crashing the build. Fixed by marking the `(app)` and `admin` layouts `force-dynamic`.
+- Admin pages returned HTTP 200 (with the correct "not found" content) instead of 404 for non-admins, because `notFound()` thrown from a layout races with the `(app)` root's `loading.tsx` Suspense boundary and with pages rendering in parallel with their layout. **Fixed and confirmed stable**: a role check in `src/middleware.ts` returns a flat 404 before any rendering, and `requireAdminPage()` is called at the top of the admin layout and every admin page as defense in depth.
+- Running the desktop and mobile e2e projects as separate parallel workers (Playwright's default) made an unrelated, pre-existing timing issue worse, since both share one webServer and one persistent database with no reset between tests. Set `workers: 1` in `playwright.config.ts`.
+- **Open, not yet root-caused**: with `workers: 1`, roughly 1 run in 2 still has a single test fail with a Playwright "strict mode violation" reporting two identical DOM elements for one static label (e.g. a quiz-mode radio label, a topic checkbox, a dashboard card, a heading) — a different element each time, never the same one twice in a row. Confirmed **not** specific to Learn Mode: it has hit the pre-existing "take a quiz" and "a new user sees empty states" tests as often as the new Learn Mode test. Captured network responses show the duplicated text appearing once in the rendered HTML and once in the embedded RSC data payload, which is the normal, expected shape — but Playwright's own accessibility snapshot at failure time reports two real `<label>`/`<h2>` elements, not one. Likely a hydration or Suspense-streaming timing issue (the `(app)/loading.tsx` boundary is a plausible contributor, per the same class of race as the admin-protection bug above), but confirming that needs a dedicated hydration-warning capture session, which this round of work didn't extend to. Three locator-ambiguity cases hit by this were hardened (`exact: true` / role-based locators) as a side effect, but that only fixes the assertion, not the underlying duplication.
+
 ## Verified — executed and passed
 
 | What | How it was run | Result |

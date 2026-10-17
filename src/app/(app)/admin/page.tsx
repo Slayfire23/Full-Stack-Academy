@@ -2,11 +2,13 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { prisma } from "@/server/db";
 import { generationStatus } from "@/server/services/generation.service";
+import { requireAdminPage } from "@/server/session";
 import { Card, PageHeader } from "@/components/ui/primitives";
 
 export const metadata: Metadata = { title: "Admin" };
 
 export default async function AdminHome() {
+  await requireAdminPage();
   const [questions, unpublished, pending, users, byType] = await Promise.all([
     prisma.question.count({ where: { ownerId: null, published: true } }),
     prisma.question.count({ where: { ownerId: null, published: false } }),

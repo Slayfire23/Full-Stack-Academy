@@ -1,6 +1,9 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
-import { getCurrentUser } from "@/server/session";
+import { requireAdminPage } from "@/server/session";
+
+// Every admin page queries the database directly, gated only by this layout's check below.
+// Without this, `next build`'s static-generation pass would run those queries with no session.
+export const dynamic = "force-dynamic";
 
 const TABS = [
   { href: "/admin", label: "Overview" },
@@ -10,10 +13,14 @@ const TABS = [
   { href: "/admin/curriculum", label: "Curriculum" },
 ];
 
-/** Server-side guard: non-admins get a 404 (the admin area's existence is not advertised). */
+/**
+ * Server-side guard: non-admins get a 404 (the admin area's existence is not advertised).
+ * src/middleware.ts blocks /admin/* for non-admins before any of this renders; this layout
+ * and each page's own requireAdminPage() call are defense in depth, since layouts and pages
+ * render in parallel and a page can reach the database before a layout's notFound() lands.
+ */
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
-  const user = await getCurrentUser();
-  if (!user || user.role !== "ADMIN") notFound();
+  await requireAdminPage();
   return (
     <>
       <nav aria-label="Admin" className="mb-6 flex flex-wrap gap-1 border-b border-border pb-3">

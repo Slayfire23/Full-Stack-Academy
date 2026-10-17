@@ -2,12 +2,14 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { listAdminQuestions } from "@/server/services/admin.service";
 import { listTopics } from "@/server/services/content.service";
+import { requireAdminPage } from "@/server/session";
 import { Badge, Card, Input, PageHeader, Select, typeLabel } from "@/components/ui/primitives";
 import { Button, buttonClasses } from "@/components/ui/button";
 
 export const metadata: Metadata = { title: "Questions — Admin" };
 
 export default async function AdminQuestions({ searchParams }: { searchParams: Promise<{ topicId?: string; q?: string; cursor?: string }> }) {
+  await requireAdminPage();
   const sp = await searchParams;
   const [topics, { items, nextCursor }] = await Promise.all([
     listTopics(),

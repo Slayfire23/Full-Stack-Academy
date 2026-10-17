@@ -3,6 +3,7 @@ import type { z } from "zod";
 import { prisma } from "../db";
 import { http } from "../http";
 import { visibleTo } from "./pool.service";
+import { lessonLockStatuses } from "./learn.service";
 import { publicPayload } from "@/lib/adaptive/grading";
 import type { AnswerData } from "@/lib/adaptive/question-schema";
 import type { questionListQuerySchema } from "@/lib/validation/schemas";
@@ -75,16 +76,36 @@ export async function getTopic(userId: string, topicId: string) {
       title: true,
       description: true,
       track: { select: { slug: true, title: true } },
-      lessons: { orderBy: { order: "asc" }, select: { id: true, slug: true, title: true, content: true, order: true } },
+      lessons: {
+        where: { published: true },
+        orderBy: { order: "asc" },
+        select: { id: true, slug: true, title: true, summary: true, content: true, level: true, estimatedMinutes: true, order: true },
+      },
     },
   });
   if (!topic) throw http.notFound("Topic");
-  const counts = await prisma.question.groupBy({
-    by: ["type"],
-    where: { AND: [visibleTo(userId), { topicId }] },
-    _count: { _all: true },
-  });
-  return { ...topic, questionTypes: Object.fromEntries(counts.map((c) => [c.type, c._count._all])) };
+  const [counts, { statuses }, userProgress] = await Promise.all([
+    prisma.question.groupBy({ by: ["type"], where: { AND: [visibleTo(userId), { topicId }] }, _count: { _all: true } }),
+    lessonLockStatuses(userId),
+    prisma.lessonProgress.findMany({
+      where: { userId, lessonId: { in: topic.lessons.map((l) => l.id) } },
+      select: { lessonId: true, status: true },
+    }),
+  ]);
+  const statusByLesson = new Map(userProgress.map((p) => [p.lessonId, p.status]));
+  return {
+    ...topic,
+    lessons: topic.lessons.map((l) => {
+      const lock = statuses.get(l.id) ?? { locked: false, missing: [] };
+      return {
+        ...l,
+        status: statusByLesson.get(l.id) ?? "NOT_STARTED",
+        locked: lock.locked,
+        missingPrerequisites: lock.missing.map((m) => ({ id: m.id, title: m.title })),
+      };
+    }),
+    questionTypes: Object.fromEntries(counts.map((c) => [c.type, c._count._all])),
+  };
 }
 
 export async function listTopics(trackSlug = "backend") {

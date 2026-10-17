@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api, ApiError } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
@@ -107,6 +108,11 @@ export function QuizSetup({
           </div>
           {topicIds.length > 0 ? (
             <button type="button" className="mt-2 text-sm text-muted underline underline-offset-4" onClick={() => setTopicIds([])}>Clear — use all topics</button>
+          ) : null}
+          {topicIds.length === 1 ? (
+            <Link href={`/topics/${topicIds[0]}`} className="mt-2 block text-sm text-accent hover:underline">
+              Study the lesson first
+            </Link>
           ) : null}
         </fieldset>
 

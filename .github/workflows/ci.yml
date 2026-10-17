@@ -32,8 +32,8 @@ jobs:
       SEED_ADMIN_EMAIL: admin@example.com
       SEED_ADMIN_PASSWORD: ci-admin-password-123
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
       # Use the committed lockfile when present (recommended: commit package-lock.json after your first npm install).
@@ -49,7 +49,7 @@ jobs:
       - name: Schema drift check (migrations match schema.prisma)
         run: npx prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --shadow-database-url "$SHADOW_DATABASE_URL" --exit-code
       - name: Database constraint tests
-        run: PGPASSWORD=postgres psql "$DATABASE_URL_TEST" -v ON_ERROR_STOP=1 -q -f tests/db/constraints.sql
+        run: PGPASSWORD=postgres psql "${DATABASE_URL_TEST%%\?*}" -v ON_ERROR_STOP=1 -q -f tests/db/constraints.sql
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run content:check
@@ -60,7 +60,7 @@ jobs:
         run: |
           npx playwright install --with-deps chromium
           npm run test:e2e
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: failure()
         with:
           name: playwright-report

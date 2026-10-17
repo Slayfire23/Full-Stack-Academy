@@ -1,10 +1,12 @@
 import { notFound } from "next/navigation";
 import { prisma } from "@/server/db";
 import { listTopics } from "@/server/services/content.service";
+import { requireAdminPage } from "@/server/session";
 import { PageHeader } from "@/components/ui/primitives";
 import { QuestionEditor } from "@/components/admin/question-editor";
 
 export default async function EditQuestion({ params }: { params: Promise<{ id: string }> }) {
+  await requireAdminPage();
   const { id } = await params;
   const topics = await listTopics();
   if (id === "new") return (<><PageHeader title="New question" /><QuestionEditor topics={topics} /></>);

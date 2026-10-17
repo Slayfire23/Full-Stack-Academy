@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { listGenerated, generationStatus } from "@/server/services/generation.service";
+import { requireAdminPage } from "@/server/session";
 import { EmptyState, PageHeader } from "@/components/ui/primitives";
 import { buttonClasses } from "@/components/ui/button";
 import { GeneratedReview, type GeneratedItem } from "@/components/admin/generated-review";
@@ -9,6 +10,7 @@ export const metadata: Metadata = { title: "AI drafts — Admin" };
 const STATUSES = ["PENDING_REVIEW", "APPROVED", "REJECTED"] as const;
 
 export default async function GeneratedPage({ searchParams }: { searchParams: Promise<{ status?: string; cursor?: string }> }) {
+  await requireAdminPage();
   const sp = await searchParams;
   const status = (STATUSES as readonly string[]).includes(sp.status ?? "") ? (sp.status as (typeof STATUSES)[number]) : "PENDING_REVIEW";
   const { items, nextCursor } = await listGenerated(status, sp.cursor, 20);

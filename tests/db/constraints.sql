@@ -39,6 +39,9 @@ INSERT INTO "Topic"(id, "trackId", slug, title, description, "updatedAt") VALUES
 INSERT INTO "Question"(id, "topicId", type, difficulty, prompt, answer, explanation, "answerData", "contentHash", "updatedAt")
   VALUES ('q1', 'tp1', 'FLASHCARD', 'BEGINNER', 'What is 404?', 'Not Found', 'e', '{"kind":"FLASHCARD"}', 'h1', now()),
          ('q2', 'tp1', 'FLASHCARD', 'BEGINNER', 'What is 500?', 'Server error', 'e', '{"kind":"FLASHCARD"}', 'h2', now());
+INSERT INTO "Lesson"(id, "topicId", slug, title, content, "updatedAt") VALUES
+  ('l1', 'tp1', 'http-basics', 'HTTP Basics', 'c', now()),
+  ('l2', 'tp1', 'status-codes', 'Status Codes', 'c', now());
 
 -- 1. Unique email
 SELECT pg_temp.expect_error($$INSERT INTO "User"(id, name, email, "passwordHash", "updatedAt") VALUES ('u3','x','ada@example.com','x',now())$$,
@@ -108,6 +111,26 @@ SELECT pg_temp.expect_error($$INSERT INTO "Bookmark"("userId", "questionId") VAL
 -- 11. Foreign keys
 SELECT pg_temp.expect_error($$INSERT INTO "QuestionProgress"(id, "userId", "questionId", "updatedAt") VALUES ('p9','nobody','q1',now())$$, '23503', 'progress for unknown user rejected');
 
+-- 11b. Lesson prerequisites: a lesson cannot require itself
+SELECT pg_temp.expect_error($$INSERT INTO "LessonPrerequisite"("lessonId", "prerequisiteId") VALUES ('l1','l1')$$,
+  '23514', 'lesson cannot be its own prerequisite');
+INSERT INTO "LessonPrerequisite"("lessonId", "prerequisiteId") VALUES ('l1','l2');
+SELECT pg_temp.expect(true, 'distinct-lesson prerequisite allowed');
+
+-- 11c. LessonProgress: understanding range, non-negative counters, correct <= attempts
+INSERT INTO "LessonProgress"(id, "userId", "lessonId", "updatedAt") VALUES ('lp1','u1','l1',now());
+SELECT pg_temp.expect_error($$UPDATE "LessonProgress" SET understanding = 6 WHERE id = 'lp1'$$, '23514', 'understanding above 5 rejected');
+SELECT pg_temp.expect_error($$UPDATE "LessonProgress" SET understanding = 0 WHERE id = 'lp1'$$, '23514', 'understanding below 1 rejected');
+UPDATE "LessonProgress" SET understanding = NULL WHERE id = 'lp1';
+SELECT pg_temp.expect(true, 'null understanding allowed (not yet self-rated)');
+SELECT pg_temp.expect_error($$UPDATE "LessonProgress" SET "practiceAttempts" = -1 WHERE id = 'lp1'$$, '23514', 'negative practice attempts rejected');
+SELECT pg_temp.expect_error($$UPDATE "LessonProgress" SET "practiceAttempts" = 1, "practiceCorrect" = 2 WHERE id = 'lp1'$$, '23514', 'practiceCorrect cannot exceed practiceAttempts');
+
+-- 11d. UnfamiliarMark: one open mark per (user, question)
+INSERT INTO "UnfamiliarMark"(id, "userId", "questionId", "topicId", "lessonId", source) VALUES ('um1','u1','q1','tp1','l1','QUIZ');
+SELECT pg_temp.expect_error($$INSERT INTO "UnfamiliarMark"(id, "userId", "questionId", "topicId", source) VALUES ('um2','u1','q1','tp1','FLASHCARD')$$,
+  '23505', 'duplicate unfamiliar mark for the same user and question rejected');
+
 -- 12. Cascades: deleting a user removes all of their private data, but not shared questions
 DELETE FROM "User" WHERE id = 'u1';
 SELECT pg_temp.expect((SELECT count(*) FROM "QuestionProgress" WHERE "userId" = 'u1') = 0, 'user delete cascades progress');
@@ -116,6 +139,9 @@ SELECT pg_temp.expect((SELECT count(*) FROM "QuestionAttempt" WHERE "userId" = '
 SELECT pg_temp.expect((SELECT count(*) FROM "Question" WHERE id = 'q4') = 0, 'user delete cascades their custom cards');
 SELECT pg_temp.expect((SELECT count(*) FROM "Question" WHERE id IN ('q1','q2')) = 2, 'shared questions survive user delete');
 SELECT pg_temp.expect((SELECT count(*) FROM "QuestionProgress" WHERE "userId" = 'u2') = 1, 'other users'' progress untouched');
+SELECT pg_temp.expect((SELECT count(*) FROM "LessonProgress" WHERE id = 'lp1') = 0, 'user delete cascades lesson progress');
+SELECT pg_temp.expect((SELECT count(*) FROM "UnfamiliarMark" WHERE id = 'um1') = 0, 'user delete cascades unfamiliar marks');
+SELECT pg_temp.expect((SELECT count(*) FROM "Lesson" WHERE id IN ('l1','l2')) = 2, 'lessons survive user delete');
 
 -- 13. Generated question published link: SET NULL when question deleted
 INSERT INTO "GeneratedQuestion"(id, kind, "topicId", model, payload, "validationReport", "contentHash", "publishedQuestionId", status)

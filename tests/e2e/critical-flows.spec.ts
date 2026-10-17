@@ -24,7 +24,7 @@ test("a new user sees empty states, not invented analytics", async ({ page }) =>
   await register(page);
   await expect(page.getByRole("heading", { name: "Welcome to Full-Stack Academy" })).toBeVisible();
   await page.goto("/progress");
-  await expect(page.getByText("No study history yet")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "No study history yet" })).toBeVisible();
 });
 
 test("study flashcards, leave, and resume with progress saved", async ({ page }) => {
@@ -49,7 +49,7 @@ test("take a quiz in each selection mode and see stored results", async ({ page 
   for (const mode of ["New questions", "Review weak topics", "Mixed practice"]) {
     await page.goto("/quizzes/new");
     await page.getByText(mode, { exact: true }).click();
-    await page.getByLabel("Questions").selectOption("5");
+    await page.getByLabel("Questions", { exact: true }).selectOption("5");
     await page.getByRole("button", { name: "Start quiz" }).click();
     await expect(page).toHaveURL(/\/quizzes\/[^/]+$/);
     await expect(page.getByText(/Picked for you/)).toBeVisible();
@@ -62,6 +62,7 @@ test("take a quiz in each selection mode and see stored results", async ({ page 
     else await page.getByLabel("Your answer").fill("409");
     await page.getByRole("button", { name: "Submit answer" }).click();
     const next = page.getByRole("button", { name: "Next question" });
+    await next.waitFor({ state: "visible", timeout: 5000 }).catch(() => {});
     if (await next.isVisible()) await next.click();
   }
   await page.getByRole("button", { name: "See results" }).click();
@@ -87,4 +88,39 @@ test("non-admins cannot reach admin pages or APIs", async ({ page }) => {
   expect(res?.status()).toBe(404);
   const api = await page.request.get("/api/admin/questions");
   expect(api.status()).toBe(403);
+});
+
+test("learn mode: unfamiliar in a quiz recommends the lesson, teach-me opens it, practice and completion clear the recommendation", async ({ page }) => {
+  await register(page);
+
+  await page.goto("/quizzes/new");
+  await page.getByText("HTTP fundamentals and status codes", { exact: true }).click();
+  await page.getByText("New questions", { exact: true }).click();
+  await page.getByLabel("Questions", { exact: true }).selectOption("5");
+  await page.getByRole("button", { name: "Start quiz" }).click();
+  await expect(page).toHaveURL(/\/quizzes\/[^/]+$/);
+
+  await page.getByRole("button", { name: "I haven't learned this yet" }).click();
+  // The button's own "Marked" confirmation is transient — it refetches the quiz right after,
+  // which replaces the button with the graded-feedback view. Wait for that instead.
+  await expect(page.getByText("Compare your answer with the model answer")).toBeVisible();
+
+  await page.goto("/dashboard");
+  await expect(page.getByRole("heading", { name: "Lessons to study" })).toBeVisible();
+  await expect(page.getByText("HTTP fundamentals and status codes: essentials").first()).toBeVisible();
+  await page.getByRole("link", { name: "Study", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/learn\/.+/);
+
+  await expect(page.getByRole("heading", { name: "HTTP fundamentals and status codes: essentials" })).toBeVisible();
+  const option = page.locator('input[type="radio"], input[type="checkbox"]').first();
+  if (await option.count()) await option.check({ force: true });
+  else await page.getByLabel("Your answer").first().fill("an answer");
+  await page.getByRole("button", { name: "Check answer" }).first().click();
+
+  await page.getByRole("button", { name: "Well", exact: true }).click();
+  await page.getByRole("button", { name: "Mark as complete" }).click();
+  await expect(page.getByText(/^Completed — /)).toBeVisible();
+
+  await page.goto("/dashboard");
+  await expect(page.getByText("HTTP fundamentals and status codes: essentials")).toHaveCount(0);
 });
