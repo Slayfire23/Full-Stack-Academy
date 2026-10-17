@@ -24,16 +24,24 @@ export function normalizeText(input: string): string {
     .replace(/\s+/g, " ");
 }
 
-/** Very light stemmer: enough to treat "requests"/"request" and "locking"/"lock" as the same token. */
+/**
+ * Very light stemmer: enough to treat "requests"/"request", "locking"/"lock",
+ * "inferred"/"infer" and "tuned"/"tune" as the same token. Deterministic and tiny on purpose.
+ */
 export function stem(word: string): string {
-  if (word.length <= 4) return word;
-  for (const suffix of ["ations", "ation", "ingly", "ings", "ing", "edly", "ies", "ied", "ers", "er", "ed", "es", "s"]) {
-    if (word.endsWith(suffix) && word.length - suffix.length >= 3) {
-      const root = word.slice(0, -suffix.length);
-      return suffix === "ies" || suffix === "ied" ? root + "y" : root;
+  if (word.length <= 3 || /^\d/.test(word)) return word;
+  let w = word;
+  for (const suffix of ["ations", "ation", "ingly", "ings", "ing", "edly", "ies", "ied", "ed", "es"]) {
+    if (w.endsWith(suffix) && w.length - suffix.length >= 3) {
+      w = suffix === "ies" || suffix === "ied" ? w.slice(0, -suffix.length) + "y" : w.slice(0, -suffix.length);
+      // "inferr" -> "infer", "stopp" -> "stop" (but keep "pass", "call", "buzz")
+      if (/([^aeiouslz])\1$/.test(w)) w = w.slice(0, -1);
+      break;
     }
   }
-  return word;
+  if (w === word && w.endsWith("s") && !/(ss|us|is)$/.test(w)) w = w.slice(0, -1); // plural "keys" -> "key"
+  if (w.length >= 4 && w.endsWith("e")) w = w.slice(0, -1); // "tune"/"tuned" -> "tun"
+  return w;
 }
 
 /** Content words: normalized, stop-words removed, stemmed. */

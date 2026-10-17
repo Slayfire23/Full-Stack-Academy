@@ -86,13 +86,18 @@ export function normalizeShort(s: string): string {
  */
 export function rubricCoverage(response: string, concepts: RubricConcept[]): RubricCoverage {
   const tokens = contentTokens(response);
-  const joined = ` ${tokens.join(" ")} `;
+  // A keyword token matches a response token exactly, or as a prefix when it is long enough
+  // to be unambiguous ("dedup" matches "deduplicated").
+  const tokenMatches = (kw: string, tok: string) => tok === kw || (kw.length >= 5 && tok.startsWith(kw));
+  const phraseAt = (kwTokens: string[], i: number) => kwTokens.every((kw, j) => tokenMatches(kw, tokens[i + j] ?? ""));
   const covered: string[] = [];
   const missing: string[] = [];
   for (const c of concepts) {
     const hit = c.keywords.some((kw) => {
       const kwTokens = contentTokens(kw);
-      return kwTokens.length > 0 && joined.includes(` ${kwTokens.join(" ")} `);
+      if (kwTokens.length === 0) return false;
+      for (let i = 0; i + kwTokens.length <= tokens.length; i++) if (phraseAt(kwTokens, i)) return true;
+      return false;
     });
     (hit ? covered : missing).push(c.key);
   }
