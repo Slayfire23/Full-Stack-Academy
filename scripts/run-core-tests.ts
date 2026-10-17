@@ -14,6 +14,16 @@ const files = readdirSync(dir)
 
 void (async () => {
   for (const f of files) {
-    await import(pathToFileURL(join(dir, f)).href);
+    try {
+      await import(pathToFileURL(join(dir, f)).href);
+    } catch (e) {
+      // Before `npm install`, files that need a real dependency (e.g. zod) are skipped, not failed.
+      const code = (e as { code?: string }).code;
+      if (code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND") {
+        console.warn(`# skipped ${f}: ${(e as Error).message.split("\n")[0]}`);
+        continue;
+      }
+      throw e;
+    }
   }
 })();

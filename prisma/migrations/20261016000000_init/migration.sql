@@ -236,6 +236,7 @@ CREATE TABLE "InterviewSession" (
     "userId" TEXT NOT NULL,
     "topicId" TEXT,
     "difficulty" "Difficulty" NOT NULL,
+    "questionIds" TEXT[] DEFAULT ARRAY[]::TEXT[],
     "startedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "completedAt" TIMESTAMP(3),
 
