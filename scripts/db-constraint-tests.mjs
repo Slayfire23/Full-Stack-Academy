@@ -10,7 +10,7 @@ const sql = readFileSync("tests/db/constraints.sql");
 const args =
   process.env.PSQL === "local"
     ? ["psql", [process.env.DATABASE_URL_TEST ?? "", "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"]]
-    : ["docker", ["compose", "exec", "-T", "db", "psql", "-U", "postgres", "-d", "backend_academy_test", "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"]];
+    : ["docker", ["compose", "exec", "-T", "db", "psql", "-U", "postgres", "-d", "full_stack_academy_test", "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"]];
 const r = spawnSync(args[0], args[1], { input: sql, encoding: "utf8", shell: process.platform === "win32" });
 const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
 const passed = (out.match(/ok {3}/g) ?? []).length;

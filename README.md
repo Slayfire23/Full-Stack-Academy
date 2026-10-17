@@ -1,31 +1,55 @@
-# Backend Academy
+# Full-Stack Academy
 
-An interview-prep platform for backend developers: spaced-repetition flashcards, adaptive quizzes, written interview scenarios, progress analytics and an admin area — built with Next.js, TypeScript, PostgreSQL and Prisma.
+An interview-prep platform: spaced-repetition flashcards, adaptive quizzes, written interview scenarios, progress analytics and an admin area — built with Next.js, TypeScript, PostgreSQL and Prisma.
+
+The **Backend Development** track is live today: 22 topics, 22 lessons and **168 questions** (90 flashcards, 45 objective quiz questions, 33 scenarios). **Frontend Development**, **Full-Stack Development**, **DevOps and Cloud** and **System Design** are listed in the curriculum as "coming soon" — their tracks exist in the schema and seed data, but have no published topics yet.
 
 Every quiz is assembled fresh for you. Questions and answer order are shuffled per quiz, questions you answered recently are held back while alternatives exist, questions you got wrong come back first, and every answer feeds a per-user spaced-repetition schedule. You choose between **New questions**, **Review weak topics** and **Mixed practice**. When an OpenAI-compatible API key is configured, the app can also generate question variations and new interview scenarios — validated and de-duplicated before they can enter the question bank. Without a key, everything else works.
 
-> **Read [TESTING.md](TESTING.md) before relying on this build.** It lists exactly what was executed and passed in the build environment and what still needs its first run on your machine. The package registry was unreachable while this was written, so the Next.js/Prisma layer has not yet been installed, built or run.
+> **Read [TESTING.md](TESTING.md) before relying on this build.** It lists exactly what has been verified and what still needs its first run in your setup.
 
 ---
 
+## Project status
+
+Verified on the developer's Windows machine against a real Supabase Postgres database (see [TESTING.md](TESTING.md) for the full log).
+
+| Area | Status |
+| --- | --- |
+| `npm install` | Done |
+| `npm run db:deploy` (migrations, against Supabase) | Done |
+| `npm run db:seed` (against Supabase) | Done |
+| `npm run dev` | Done — serves the dashboard |
+| Unit tests (`npm run test:core`) | Passing — 126 tests |
+| SQL constraint tests (`npm run test:db`) | Passing — 27 checks |
+| `npm run typecheck` | Not yet run |
+| `npm run lint` | Not yet run |
+| Integration tests (`npm test`) | Not yet run |
+| `npm run build` | Not yet run |
+| End-to-end tests (`npm run test:e2e`) | Not yet run |
+| Deployment | Not deployed |
+
 ## Contents
 
-- [What's inside](#whats-inside)
+- [Project status](#project-status)
+- [Features](#features)
+- [Tech stack](#tech-stack)
 - [Quick start on Windows (VS Code)](#quick-start-on-windows-vs-code)
 - [Quick start on macOS / Linux](#quick-start-on-macos--linux)
 - [Configuration](#configuration)
 - [Running the tests](#running-the-tests)
 - [Everyday commands](#everyday-commands)
 - [Optional AI features](#optional-ai-features)
+- [Project structure](#project-structure)
 - [Deployment](#deployment)
 - [Troubleshooting](#troubleshooting)
 - [Documentation map](#documentation-map)
 
-## What's inside
+## Features
 
 | Area | Highlights |
 | --- | --- |
-| Curriculum | Backend track, 22 topics, 22 lessons, **168 questions** (90 flashcards, 45 objective quiz questions, 33 scenarios). Four further tracks are listed as "coming soon". |
+| Curriculum | Backend Development track live: 22 topics, 22 lessons, **168 questions** (90 flashcards, 45 objective quiz questions, 33 scenarios). Frontend, Full-Stack, DevOps and Cloud, and System Design are coming soon. |
 | Flashcards | Flip, rate Again / Hard / Good / Easy (buttons show the real next interval), bookmarks, filters, "questions I got wrong", resumable sessions, private custom cards. |
 | Quizzes | Multiple choice, select-all, short answer, code reading, scenarios. Practice or test feedback, optional timer, server-side grading, retry missed questions. |
 | Adaptive engine | Seeded randomisation, recency avoidance, mistake prioritisation, spaced repetition, topic-weakness detection, topic diversity caps — all per user. |
@@ -33,14 +57,27 @@ Every quiz is assembled fresh for you. Questions and answer order are shuffled p
 | Analytics | Accuracy, streak (in your time zone), study time, topic strengths and weaknesses, 30-day activity, 14-day review forecast, next-topic recommendation. Empty states for new users — nothing is invented. |
 | Admin | Question editor, validated JSON import with dry run, AI draft review queue, curriculum and lesson editing. |
 
+## Tech stack
+
+| Layer | Choice |
+| --- | --- |
+| Framework | Next.js 15 (App Router), React 19, TypeScript |
+| Styling | Tailwind CSS 4 |
+| Auth | Auth.js (`next-auth` 5 beta), credentials-based sessions |
+| Database | PostgreSQL — **Supabase** for the app database, a local Docker Postgres for destructive tests |
+| ORM / migrations | Prisma 6 |
+| Validation | Zod 4 |
+| Unit / integration tests | Vitest 3, plus a dependency-free `node:test` shim (`test:core`) |
+| End-to-end tests | Playwright |
+| Optional AI | Any OpenAI-compatible Chat Completions endpoint |
+
 ## Quick start on Windows (VS Code)
 
 ### 1. Install the prerequisites
 
 - **Node.js 22 LTS** (20.18+ also works): <https://nodejs.org>. Check with `node -v`.
 - **Git**: <https://git-scm.com/download/win>
-- **Docker Desktop** (easiest way to run PostgreSQL): <https://www.docker.com/products/docker-desktop/>
-  Prefer a native install? See [Without Docker](#without-docker-native-postgresql-on-windows).
+- **Docker Desktop**: <https://www.docker.com/products/docker-desktop/> — only needed for `DATABASE_URL_TEST`, the local database used by destructive/integration tests. The app itself talks to Supabase.
 - **VS Code** with the recommended extensions: ESLint, Prettier, Prisma, Tailwind CSS IntelliSense.
 
 ### 2. Open the project and install dependencies
@@ -48,7 +85,7 @@ Every quiz is assembled fresh for you. Questions and answer order are shuffled p
 Unzip (or clone) the project, open the folder in VS Code, then open a terminal (**Terminal → New Terminal**, PowerShell):
 
 ```powershell
-cd backend-academy
+cd full-stack-academy
 npm install
 ```
 
@@ -61,26 +98,30 @@ Copy-Item .env.example .env
 node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 ```
 
-Open `.env` and paste the printed value into `AUTH_SECRET`. Change `SEED_ADMIN_EMAIL` and `SEED_ADMIN_PASSWORD` (10+ characters) to the account you want as administrator. The database URLs already match the Docker setup.
+Open `.env` and paste the printed value into `AUTH_SECRET`. Change `SEED_ADMIN_EMAIL` and `SEED_ADMIN_PASSWORD` (10+ characters) to the account you want as administrator.
 
-### 4. Start PostgreSQL
+Set `DATABASE_URL` to your **Supabase** project's connection string (Supabase dashboard → Project Settings → Database → Connection string). This is the app's real database — treat it like production data, not a scratch database.
 
-Make sure Docker Desktop is running, then:
+Leave `DATABASE_URL_TEST` pointed at the **local Docker database** (`localhost:5432`, started in the next step). Never point `DATABASE_URL_TEST` at Supabase: it is wiped by integration and constraint tests.
+
+### 4. Start the local test database
+
+Only needed for `test:db`, `test` (integration) and `db:test:migrate`; the app itself uses Supabase, not this container. Make sure Docker Desktop is running, then:
 
 ```powershell
 npm run db:up
 ```
 
-This starts PostgreSQL 16 on `localhost:5432` and, on first start, creates three databases: `backend_academy` (app), `backend_academy_test` (tests) and `backend_academy_shadow` (migration checks).
+This starts PostgreSQL 16 on `localhost:5432` and, on first start, creates `full_stack_academy_test` and `full_stack_academy_shadow`.
 
-### 5. Create the schema and load the questions
+### 5. Create the schema and load the questions (on Supabase)
 
 ```powershell
 npm run db:deploy
 npm run db:seed
 ```
 
-`db:deploy` applies the committed migrations. `db:seed` loads the curriculum and question bank and creates your admin account. Both are safe to run again.
+`db:deploy` applies the committed migrations to whatever `DATABASE_URL` points at — make sure that's your Supabase connection string. `db:seed` loads the curriculum and question bank and creates your admin account. Both are safe to run again.
 
 ### 6. Start the app
 
@@ -90,25 +131,14 @@ npm run dev
 
 Open <http://localhost:3000>, sign in with your admin email and password (or register a normal account), and start with a **New questions** quiz.
 
-### Without Docker: native PostgreSQL on Windows
-
-1. Install PostgreSQL 16 from <https://www.postgresql.org/download/windows/> (remember the `postgres` password; keep port 5432).
-2. In a terminal (use **SQL Shell (psql)** from the Start menu if `psql` is not on your PATH):
-   ```sql
-   CREATE DATABASE backend_academy;
-   CREATE DATABASE backend_academy_test;
-   CREATE DATABASE backend_academy_shadow;
-   ```
-3. Update the password in `DATABASE_URL` and `DATABASE_URL_TEST` in `.env`, then continue from step 5.
-
 ## Quick start on macOS / Linux
 
 ```bash
 npm install
-cp .env.example .env    # then set AUTH_SECRET, SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD
-npm run db:up
-npm run db:deploy
-npm run db:seed
+cp .env.example .env    # then set DATABASE_URL (Supabase), AUTH_SECRET, SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD
+npm run db:up            # local Docker DB, for DATABASE_URL_TEST only
+npm run db:deploy        # applies migrations to DATABASE_URL (Supabase)
+npm run db:seed          # seeds DATABASE_URL (Supabase)
 npm run dev
 ```
 
@@ -118,8 +148,8 @@ All variables are documented in [`.env.example`](.env.example).
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | yes | PostgreSQL connection string for the app. |
-| `DATABASE_URL_TEST` | for tests | Separate database for integration tests. **Its data is deleted** by the tests. |
+| `DATABASE_URL` | yes | PostgreSQL connection string for the app — **Supabase** in this project, with real data. |
+| `DATABASE_URL_TEST` | for tests | A separate, local Docker database for integration and constraint tests. **Its data is deleted** by the tests. Must never point at Supabase. |
 | `AUTH_SECRET` | yes | Signs session tokens. 32+ random bytes. |
 | `AUTH_TRUST_HOST` | production | `true` behind Vercel or a trusted proxy. |
 | `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD` | for seeding | Admin account created by `db:seed` if it does not exist. |
@@ -132,20 +162,21 @@ All variables are documented in [`.env.example`](.env.example).
 
 | Command | Needs | What it runs |
 | --- | --- | --- |
-| `npm run test:core` | Node only (works before `npm install` with a global `tsx`) | 126 unit tests of the adaptive engine, scheduling, grading, validation, dedupe, AI pipeline and question bank. |
-| `npm run content:check` | Node | Validates every seed question, answer key and rubric, and checks for near-duplicates. |
+| `npm run test:core` | Node only | 126 unit tests of the adaptive engine, scheduling, grading, validation, dedupe, AI pipeline and question bank. Does not touch any database. |
+| `npm run content:check` | Node | Validates every seed question, answer key and rubric, and checks for near-duplicates. Does not touch any database. |
 | `npm run typecheck` | `npm install` | TypeScript across the whole project. |
 | `npm run lint` | `npm install` | ESLint (Next.js rules). |
-| `npm test` | `npm install`; DB for integration | Vitest: all unit tests plus integration tests against `DATABASE_URL_TEST` (skipped if unset). |
-| `npm run test:db` | Docker DB | SQL tests proving the database constraints (27 checks). Set `PSQL=local` to use a local `psql`. |
+| `npm test` | `npm install`; local Docker DB | Vitest: all unit tests plus integration tests against `DATABASE_URL_TEST` — **never run this against Supabase.** |
+| `npm run test:db` | local Docker DB | SQL tests proving the database constraints (27 checks) against `DATABASE_URL_TEST`. Set `PSQL=local` to use a local `psql`. |
 | `npm run test:e2e` | built app + seeded DB | Playwright: sign-in redirects, flashcards with resume, all three quiz modes, interview without AI, admin protection — on desktop and mobile viewports. |
 
-First-time setup for the database and browser tests:
+First-time setup for the local test database and browser tests:
 
 ```powershell
+npm run db:up                    # local Docker Postgres, for DATABASE_URL_TEST
 npm run db:test:migrate          # apply migrations to the test database
 npm run test:db                  # constraint tests
-npm test                         # unit + integration
+npm test                         # unit + integration (against DATABASE_URL_TEST)
 npx playwright install chromium  # one time
 npm run build
 npm run test:e2e
@@ -157,9 +188,9 @@ npm run test:e2e
 | --- | --- |
 | `npm run dev` | Development server on port 3000. |
 | `npm run build` / `npm start` | Production build / serve it. |
-| `npm run db:migrate` | After editing `prisma/schema.prisma`: create and apply a new migration (development only). |
-| `npm run db:studio` | Browse the database in Prisma Studio. |
-| `npm run db:reset` | Drop and recreate the dev database, then re-seed. **Deletes all data.** |
+| `npm run db:studio` | Browse the database in Prisma Studio — points at whatever `DATABASE_URL` is set to; double-check before editing data. |
+| `npm run db:migrate` | **Never run against Supabase.** Creates and applies a new migration from local schema changes (`prisma migrate dev`); only safe against a disposable local/test database. |
+| `npm run db:reset` | **Never run against Supabase.** Drops and recreates the target database, then re-seeds. **Deletes all data.** Only ever point this at `DATABASE_URL_TEST`. |
 | `npm run format` | Prettier. |
 
 ## Optional AI features
@@ -172,21 +203,38 @@ Set `AI_API_KEY` (plus `AI_BASE_URL` / `AI_MODEL` for non-OpenAI providers) and 
 
 Every generated question passes structural validation, an answer-key consistency check, a ban on position-dependent options ("all of the above" breaks when answers are shuffled), and near-duplicate detection against the bank before it is queued. It reaches learners only after admin approval (**Admin → AI drafts**) or, with `AI_AUTO_PUBLISH=true`, automatically — approval re-checks everything against the bank as it is at that moment. Automated checks cannot verify technical accuracy, so review drafts before approving.
 
+## Project structure
+
+```
+content/          Curriculum, lessons and the 168-question bank (seed data)
+prisma/           schema.prisma, migrations, seed script
+src/app/          Next.js App Router: (auth), (app) dashboard/curriculum/flashcards/quizzes/interviews/
+                  review-queue/progress/settings/admin route groups, and API routes
+src/components/   Shared UI (shell/nav, forms, cards, etc.)
+src/lib/          Adaptive engine (selection, SRS, grading, validation, dedupe), AI client, validation schemas
+src/server/       Services (quiz, flashcards, interviews, generation, analytics, admin) and the HTTP wrapper
+scripts/          Content checks, core-test runner, DB constraint test runner, SQL seed
+tests/            Vitest unit/integration tests, Playwright e2e specs, SQL constraint tests
+docker/           init-test-db.sql — creates the local test/shadow databases on first container start
+```
+
 ## Deployment
 
-See [DEPLOYMENT.md](DEPLOYMENT.md) for Vercel + managed PostgreSQL and for the Docker image.
+See [DEPLOYMENT.md](DEPLOYMENT.md) for Vercel + managed PostgreSQL and for the Docker image. Not yet deployed.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 | --- | --- |
-| `Can't reach database server at localhost:5432` | Start Docker Desktop and run `npm run db:up`. Check nothing else uses port 5432. |
-| `The table "public.Question" does not exist` | Run `npm run db:deploy`. |
+| `Environment variable not found: DATABASE_URL` (or similar "missing `.env`" errors) | You haven't created `.env` yet. Run `Copy-Item .env.example .env` (Windows) or `cp .env.example .env` (macOS/Linux), then fill in `DATABASE_URL` (Supabase) and `AUTH_SECRET`. |
+| `Can't reach database server` | Check `DATABASE_URL` — for the app this should be your Supabase connection string, not `localhost`. For `DATABASE_URL_TEST`, start Docker Desktop and run `npm run db:up`. |
+| `The table "public.Question" does not exist` | Run `npm run db:deploy` against the database `DATABASE_URL` currently points at. |
 | Sign-in fails right after setup | Run `npm run db:seed` and use `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`, or register a new account. |
 | `MissingSecret` / auth errors | Set `AUTH_SECRET` in `.env` and restart `npm run dev`. |
-| `prisma migrate dev` reports drift | The committed SQL is the source of truth. In development only, `npm run db:reset` rebuilds the database. Report it — CI runs a drift check. |
-| Integration tests are skipped | Set `DATABASE_URL_TEST` in `.env` and run `npm run db:test:migrate`. |
+| `prisma migrate dev` reports drift | The committed SQL is the source of truth. Never run `db:migrate` or `db:reset` against Supabase — point them only at `DATABASE_URL_TEST` or a disposable local database. |
+| Integration tests are skipped | Set `DATABASE_URL_TEST` to the local Docker database (not Supabase) and run `npm run db:test:migrate`. |
 | PowerShell blocks `npm` scripts | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once. |
+| Garbled characters like `â€”` instead of an em dash in a doc or source file | A text edit was saved with the wrong encoding (commonly from piping through `Get-Content`/`Set-Content` in PowerShell). Re-save the file as UTF-8 without a BOM; don't edit text files through PowerShell's `Get-Content`/`Set-Content` cmdlets. |
 
 ## Documentation map
 

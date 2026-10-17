@@ -1,4 +1,4 @@
-// Backend Academy — Prisma schema
+// Full-Stack Academy — Prisma schema
 // See DATABASE.md for the reasoning behind each model.
 
 generator client {

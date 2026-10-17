@@ -7,7 +7,7 @@ const instrument = Instrument_Sans({ subsets: ["latin"], variable: "--font-instr
 const jetbrains = JetBrains_Mono({ subsets: ["latin"], variable: "--font-jetbrains", display: "swap" });
 
 export const metadata: Metadata = {
-  title: { default: "Backend Academy", template: "%s — Backend Academy" },
+  title: { default: "Full-Stack Academy", template: "%s — Full-Stack Academy" },
   description: "Practise backend engineering for interviews with adaptive quizzes, spaced-repetition flashcards and scenario drills.",
 };
 

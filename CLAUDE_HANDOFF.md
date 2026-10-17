@@ -1,10 +1,14 @@
 # Handoff — current state
 
-_Last updated: 2026-10-16. Read TESTING.md first._
+_Last updated: 2026-10-17. Read TESTING.md first._
 
 ## State in one paragraph
 
-Backend Academy is fully written: schema + migrations, adaptive engine, 168-question bank, services, 45 API routes, all pages, Vitest/Playwright tests, CI, Dockerfile and docs. The build sandbox could not reach the npm registry, so **the Next.js app has never been installed, built or run**. Everything dependency-free was executed: 126 unit tests (engine, scheduler, grading, validation, dedupe, AI pipeline, content, Zod schemas under Zod 3 and 4), 27 SQL constraint tests on PostgreSQL 16, a schema↔migration equivalence check, seed loading (idempotent), and a whole-app type check against package stubs.
+Full-Stack Academy is fully written: schema + migrations, adaptive engine, 168-question bank, services, 45 API routes, all pages, Vitest/Playwright tests, CI, Dockerfile and docs. **It has since been installed, migrated and seeded against a real Supabase database, and `npm run dev` serves the dashboard**, verified on the developer's Windows machine (see TESTING.md). Everything dependency-free was executed earlier in a sandbox: 126 unit tests (engine, scheduler, grading, validation, dedupe, AI pipeline, content, Zod schemas under Zod 3 and 4), 27 SQL constraint tests on PostgreSQL 16, a schema↔migration equivalence check, seed loading (idempotent), and a whole-app type check against package stubs.
+
+## Database
+
+The app's `DATABASE_URL` points at a **Supabase** Postgres database with real data — not a local/throwaway database. Never run `prisma migrate dev`, `prisma migrate reset`, `npm run db:reset` or `npm test` against it. Destructive or reset-style commands (`db:reset`, `db:migrate`, integration tests, `test:db`) must only ever target `DATABASE_URL_TEST`, which should stay pointed at the local Docker Postgres from `docker-compose.yml`.
 
 ## First thing to do
 

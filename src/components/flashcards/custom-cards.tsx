@@ -97,7 +97,7 @@ export function CustomCards({ cards, topics }: { cards: CustomCard[]; topics: { 
             <Textarea id="cc-answer" className="min-h-20" value={form.answer} onChange={(e) => setForm({ ...form, answer: e.target.value })} required />
           </div>
           <div>
-            <Label htmlFor="cc-expl">Why it's right (optional)</Label>
+            <Label htmlFor="cc-expl">Why it&apos;s right (optional)</Label>
             <Textarea id="cc-expl" className="min-h-20" value={form.explanation} onChange={(e) => setForm({ ...form, explanation: e.target.value })} />
           </div>
           <div>

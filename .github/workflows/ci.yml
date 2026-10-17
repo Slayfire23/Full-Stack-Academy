@@ -18,15 +18,15 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: backend_academy
+          POSTGRES_DB: full_stack_academy
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       CI: "true"
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backend_academy?schema=public
-      DATABASE_URL_TEST: postgresql://postgres:postgres@localhost:5432/backend_academy_test?schema=public
-      SHADOW_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backend_academy_shadow?schema=public
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/full_stack_academy?schema=public
+      DATABASE_URL_TEST: postgresql://postgres:postgres@localhost:5432/full_stack_academy_test?schema=public
+      SHADOW_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/full_stack_academy_shadow?schema=public
       AUTH_SECRET: ci-only-secret-not-used-anywhere-else-0123456789
       AUTH_TRUST_HOST: "true"
       SEED_ADMIN_EMAIL: admin@example.com
@@ -40,8 +40,8 @@ jobs:
       - run: if [ -f package-lock.json ]; then npm ci; else npm install; fi
       - name: Create test and shadow databases
         run: |
-          PGPASSWORD=postgres psql -h localhost -U postgres -c "CREATE DATABASE backend_academy_test"
-          PGPASSWORD=postgres psql -h localhost -U postgres -c "CREATE DATABASE backend_academy_shadow"
+          PGPASSWORD=postgres psql -h localhost -U postgres -c "CREATE DATABASE full_stack_academy_test"
+          PGPASSWORD=postgres psql -h localhost -U postgres -c "CREATE DATABASE full_stack_academy_shadow"
       - name: Migrate
         run: |
           npx prisma migrate deploy

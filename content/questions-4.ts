@@ -1,4 +1,4 @@
-import { D, fc, mc, ms, sa, sc, type SeedQuestion } from "./helpers";
+import { D, fc, mc, ms, sc, type SeedQuestion } from "./helpers";
 
 const { B, I, A } = D;
 

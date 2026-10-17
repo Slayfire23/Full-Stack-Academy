@@ -1,8 +1,8 @@
 {
-  "name": "backend-academy",
+  "name": "full-stack-academy",
   "version": "0.2.0",
   "private": true,
-  "description": "Interactive backend interview-prep platform with adaptive, spaced-repetition question selection.",
+  "description": "Full-Stack Academy: interview-prep platform with adaptive quizzes, spaced-repetition flashcards and interview practice.",
   "engines": {
     "node": ">=20.18.0"
   },

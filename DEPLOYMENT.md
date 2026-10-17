@@ -29,11 +29,11 @@ Not yet deployed: no hosting or database credentials were available when this wa
 ## Option B — Docker
 
 ```bash
-docker build -t backend-academy .
+docker build -t full-stack-academy .
 docker run -p 3000:3000 \
-  -e DATABASE_URL="postgresql://user:pass@host:5432/backend_academy" \
+  -e DATABASE_URL="postgresql://user:pass@host:5432/full_stack_academy" \
   -e AUTH_SECRET="<random>" -e AUTH_TRUST_HOST=true \
-  backend-academy
+  full-stack-academy
 ```
 
 The image is multi-stage, runs as a non-root user, uses Next.js standalone output, applies pending migrations on start (`prisma migrate deploy`) and exposes a HEALTHCHECK on `/api/health`. With several replicas, run migrations as a separate release job instead of on container start. Seed once with `npm run db:seed` from a machine that can reach the database.

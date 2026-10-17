@@ -48,11 +48,11 @@ export interface RouteContext<P extends Params> {
 export function route<P extends Params = Record<string, never>>(
   handler: (req: Request, ctx: RouteContext<P>) => Promise<unknown>,
 ) {
-  return async (req: Request, ctx?: { params?: Promise<P> }): Promise<Response> => {
+  return async (req: Request, ctx: { params: Promise<P> }): Promise<Response> => {
     const requestId = sanitizeRequestId(req.headers.get("x-request-id")) ?? crypto.randomUUID();
     const started = Date.now();
     try {
-      const params = ((await ctx?.params) ?? {}) as P;
+      const params = ((await ctx.params) ?? {}) as P;
       const result = await handler(req, { params, requestId });
       const res = result instanceof Response ? result : NextResponse.json(result ?? { ok: true });
       res.headers.set("x-request-id", requestId);

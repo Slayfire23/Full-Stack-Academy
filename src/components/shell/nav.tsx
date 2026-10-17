@@ -118,7 +118,7 @@ export function Shell({
       </a>
 
       <aside className="sticky top-0 hidden h-dvh flex-col gap-6 border-r border-border bg-surface px-3 py-5 lg:flex">
-        <Link href="/dashboard" className="px-3 text-base font-semibold tracking-tight">Backend Academy</Link>
+        <Link href="/dashboard" className="px-3 text-base font-semibold tracking-tight">Full-Stack Academy</Link>
         <nav aria-label="Main" className="flex-1 overflow-y-auto">
           <NavLinks due={due} isAdmin={user.role === "ADMIN"} />
         </nav>
@@ -126,7 +126,7 @@ export function Shell({
       </aside>
 
       <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-border bg-surface/95 px-4 backdrop-blur lg:hidden">
-        <Link href="/dashboard" className="font-semibold">Backend Academy</Link>
+        <Link href="/dashboard" className="font-semibold">Full-Stack Academy</Link>
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}

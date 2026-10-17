@@ -20,7 +20,7 @@ export default async function DashboardPage() {
   return (
     <>
       <PageHeader
-        title={d.isNewUser ? "Welcome to Backend Academy" : "Today"}
+        title={d.isNewUser ? "Welcome to Full-Stack Academy" : "Today"}
         description={
           d.isNewUser
             ? "Nothing to review yet. Start with a short quiz or a flashcard session and your schedule builds itself."

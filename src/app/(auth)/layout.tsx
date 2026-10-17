@@ -2,7 +2,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
   return (
     <main className="grid min-h-dvh lg:grid-cols-[1fr_minmax(420px,520px)]">
       <section className="hidden flex-col justify-between border-r border-border bg-surface p-12 lg:flex">
-        <p className="text-lg font-semibold">Backend Academy</p>
+        <p className="text-lg font-semibold">Full-Stack Academy</p>
         <div className="max-w-md">
           <p className="text-4xl font-semibold leading-tight tracking-tight">
             Two requests reserve the last item at the same time. What stops you overselling?

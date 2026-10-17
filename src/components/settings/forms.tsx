@@ -76,7 +76,7 @@ export function PreferencesForm({ initial }: { initial: Settings }) {
           <div>
             <Label htmlFor="s-recent">Hold back recently answered questions for</Label>
             <Select id="s-recent" value={s.recentWindowHours} onChange={(e) => setS({ ...s, recentWindowHours: Number(e.target.value) })}>
-              <option value={0}>Don't hold back</option>
+              <option value={0}>Don&apos;t hold back</option>
               <option value={6}>6 hours</option>
               <option value={24}>1 day</option>
               <option value={72}>3 days</option>

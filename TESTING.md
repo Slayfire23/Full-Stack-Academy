@@ -4,6 +4,21 @@ This project was built in a sandbox where the npm registry was blocked by networ
 
 Build environment: Node 22.22, TypeScript 6.0, PostgreSQL 16, Linux. Date: 2026-10-16.
 
+## Verified on the developer's Windows machine
+
+Run separately from the sandbox above, against a real **Supabase** Postgres database (`DATABASE_URL`) on Windows. Date: 2026-10-17.
+
+| What | Result |
+| --- | --- |
+| `npm install` | OK |
+| `npm run db:deploy` | Both migrations applied cleanly to Supabase |
+| `npm run db:seed` | Created 5 tracks, 22 topics, 168 questions and the seeded admin account |
+| `npm run dev` | Dev server starts and serves the dashboard |
+| `npm run test:core` | 126 unit tests passed |
+| `npm run test:db` | 27 SQL constraint tests passed |
+
+Not yet run on this machine: `npm run typecheck`, `npm run lint`, `npm test` (integration), `npm run build`, `npm run test:e2e`. See [README.md](README.md#project-status) for the current status table.
+
 ## Verified — executed and passed
 
 | What | How it was run | Result |

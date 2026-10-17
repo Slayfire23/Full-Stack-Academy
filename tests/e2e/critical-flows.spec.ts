@@ -22,7 +22,7 @@ test("signed-out visitors are sent to sign in, and APIs return 401", async ({ pa
 
 test("a new user sees empty states, not invented analytics", async ({ page }) => {
   await register(page);
-  await expect(page.getByRole("heading", { name: "Welcome to Backend Academy" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Welcome to Full-Stack Academy" })).toBeVisible();
   await page.goto("/progress");
   await expect(page.getByText("No study history yet")).toBeVisible();
 });

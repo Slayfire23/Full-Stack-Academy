@@ -41,11 +41,8 @@ export async function getProfile(userId: string) {
     select: { id: true, name: true, email: true, role: true, createdAt: true, settings: true },
   });
   if (!user) throw http.notFound("User");
-  if (!user.settings) {
-    const settings = await prisma.userSettings.create({ data: { userId } });
-    return { ...user, settings };
-  }
-  return user;
+  const settings = user.settings ?? (await prisma.userSettings.create({ data: { userId } }));
+  return { ...user, settings };
 }
 
 export async function updateProfile(userId: string, input: z.output<typeof profileUpdateSchema>) {

@@ -134,7 +134,7 @@ export async function saveResponse(userId: string, sessionId: string, input: z.o
     selfAssessment && concepts.length > 0
       ? Math.round((Object.values(selfAssessment).filter(Boolean).length / concepts.length) * 100)
       : null;
-  const rubricResult = { coverage, selfAssessment, scoreSource: score === null ? null : "self-assessment" };
+  const rubricResult = { coverage, selfAssessment, scoreSource: score === null ? null : "self-assessment" } as unknown as Prisma.InputJsonValue;
 
   const isFirst = !s.responses.some((r) => r.questionId === input.questionId);
   await prisma.$transaction(async (tx) => {
