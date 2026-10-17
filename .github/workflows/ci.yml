@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: backend_academy
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CI: "true"
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backend_academy?schema=public
+      DATABASE_URL_TEST: postgresql://postgres:postgres@localhost:5432/backend_academy_test?schema=public
+      SHADOW_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backend_academy_shadow?schema=public
+      AUTH_SECRET: ci-only-secret-not-used-anywhere-else-0123456789
+      AUTH_TRUST_HOST: "true"
+      SEED_ADMIN_EMAIL: admin@example.com
+      SEED_ADMIN_PASSWORD: ci-admin-password-123
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Use the committed lockfile when present (recommended: commit package-lock.json after your first npm install).
+      - run: if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      - name: Create test and shadow databases
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -c "CREATE DATABASE backend_academy_test"
+          PGPASSWORD=postgres psql -h localhost -U postgres -c "CREATE DATABASE backend_academy_shadow"
+      - name: Migrate
+        run: |
+          npx prisma migrate deploy
+          DATABASE_URL=$DATABASE_URL_TEST npx prisma migrate deploy
+      - name: Schema drift check (migrations match schema.prisma)
+        run: npx prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --shadow-database-url "$SHADOW_DATABASE_URL" --exit-code
+      - name: Database constraint tests
+        run: PGPASSWORD=postgres psql "$DATABASE_URL_TEST" -v ON_ERROR_STOP=1 -q -f tests/db/constraints.sql
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run content:check
+      - run: npm test
+      - run: npm run db:seed
+      - run: npm run build
+      - name: End-to-end tests
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report
+          retention-days: 7

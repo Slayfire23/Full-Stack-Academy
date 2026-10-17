@@ -24,7 +24,10 @@
     "db:seed": "prisma db seed",
     "db:reset": "prisma migrate reset",
     "db:studio": "prisma studio",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "db:test:migrate": "node scripts/migrate-test-db.mjs",
+    "test:db": "node scripts/db-constraint-tests.mjs",
+    "seed:sql": "tsx --tsconfig tsconfig.core.json scripts/seed-sql.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
