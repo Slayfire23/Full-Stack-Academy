@@ -1,6 +1,6 @@
 import type { Prisma, PrismaClient, StudyKind } from "@prisma/client";
 import { applyOutcome, type AnswerOutcome, type ProgressRecord, type Rating } from "@/lib/adaptive/srs";
-import type { QuestionHistory, TopicPerformance } from "@/lib/adaptive/selection";
+import type { TopicPerformance } from "@/lib/adaptive/selection";
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -47,7 +47,7 @@ function toRecord(row: ProgressRow): ProgressRecord {
 }
 
 /** History for the selector: only this user's rows, optionally limited to some questions. */
-export async function loadHistory(db: Db, userId: string, questionIds?: string[]): Promise<Map<string, QuestionHistory>> {
+export async function loadHistory(db: Db, userId: string, questionIds?: string[]): Promise<Map<string, ProgressRecord>> {
   const rows = await db.questionProgress.findMany({
     where: { userId, ...(questionIds ? { questionId: { in: questionIds } } : {}) },
   });

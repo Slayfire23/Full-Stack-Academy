@@ -65,7 +65,16 @@ async function cardsFor(userId: string, ids: string[]) {
         isCustom: r.ownerId === userId,
         bookmarked: marked.has(r.id),
         progress: h
-          ? { nextReviewAt: h.nextReviewAt, timesSeen: h.timesSeen, lastCorrect: h.lastCorrect, consecutiveCorrect: h.consecutiveCorrect }
+          ? {
+              nextReviewAt: h.nextReviewAt,
+              timesSeen: h.timesSeen,
+              lastCorrect: h.lastCorrect,
+              consecutiveCorrect: h.consecutiveCorrect,
+              repetitions: h.repetitions,
+              intervalDays: h.intervalDays,
+              easeFactor: h.easeFactor,
+              lapses: h.lapses,
+            }
           : null,
       };
     });
