@@ -1,0 +1,454 @@
+// Backend Academy — Prisma schema
+// See DATABASE.md for the reasoning behind each model.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────── Enums ─────────────────────────
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum Difficulty {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+enum QuestionType {
+  FLASHCARD
+  MULTIPLE_CHOICE
+  MULTIPLE_SELECT
+  SHORT_ANSWER
+  CODE_READING
+  SCENARIO
+}
+
+enum QuestionSource {
+  SEED
+  ADMIN
+  IMPORT
+  USER_CUSTOM
+  AI_GENERATED
+}
+
+enum ReviewRating {
+  AGAIN
+  HARD
+  GOOD
+  EASY
+}
+
+enum SelectionMode {
+  NEW
+  WEAK
+  MIXED
+}
+
+enum StudyKind {
+  FLASHCARD
+  QUIZ
+  INTERVIEW
+}
+
+enum QuizStatus {
+  IN_PROGRESS
+  COMPLETED
+  ABANDONED
+}
+
+enum FeedbackMode {
+  IMMEDIATE
+  END
+}
+
+enum Theme {
+  SYSTEM
+  DARK
+  LIGHT
+}
+
+enum GenerationKind {
+  VARIATION
+  INTERVIEW_SCENARIO
+}
+
+enum GenerationStatus {
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+}
+
+// ───────────────────────── Users ─────────────────────────
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(USER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  settings           UserSettings?
+  ownedQuestions     Question[]          @relation("QuestionOwner")
+  progress           QuestionProgress[]
+  reviewLogs         ReviewLog[]
+  bookmarks          Bookmark[]
+  quizAttempts       QuizAttempt[]
+  questionAttempts   QuestionAttempt[]
+  interviewSessions  InterviewSession[]
+  studySessions      StudySession[]
+  generationRequests GeneratedQuestion[] @relation("GenerationRequester")
+  generationReviews  GeneratedQuestion[] @relation("GenerationReviewer")
+}
+
+model UserSettings {
+  userId               String        @id
+  theme                Theme         @default(SYSTEM)
+  dailyGoal            Int           @default(20)
+  preferredDifficulty  Difficulty?
+  defaultSelectionMode SelectionMode @default(MIXED)
+  /// Questions answered within this many hours count as "recent" and are avoided when alternatives exist.
+  recentWindowHours    Int           @default(24)
+  /// IANA zone used to decide where "today" ends for streaks and daily goals.
+  timeZone             String        @default("UTC")
+  updatedAt            DateTime      @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ───────────────────────── Curriculum ─────────────────────────
+
+model LearningTrack {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  title       String
+  description String
+  published   Boolean  @default(false)
+  order       Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  topics Topic[]
+}
+
+model Topic {
+  id          String   @id @default(cuid())
+  trackId     String
+  slug        String
+  title       String
+  description String
+  order       Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  track              LearningTrack       @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  lessons            Lesson[]
+  questions          Question[]
+  interviewSessions  InterviewSession[]
+  generatedQuestions GeneratedQuestion[]
+
+  @@unique([trackId, slug])
+  @@index([trackId, order])
+}
+
+model Lesson {
+  id        String   @id @default(cuid())
+  topicId   String
+  slug      String
+  title     String
+  content   String
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  topic     Topic      @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  questions Question[]
+
+  @@unique([topicId, slug])
+  @@index([topicId, order])
+}
+
+model Question {
+  id               String         @id @default(cuid())
+  /// Stable human-readable key (e.g. "http-003") used for idempotent seeding and imports.
+  externalKey      String?        @unique
+  topicId          String
+  lessonId         String?
+  type             QuestionType
+  difficulty       Difficulty
+  prompt           String
+  /// Canonical answer text. Shown on the back of a flashcard and after grading.
+  answer           String
+  explanation      String
+  /// Type-specific grading data. Shape is validated in src/lib/adaptive/question-schema.ts.
+  answerData       Json
+  codeExample      String?
+  scenario         String?
+  tags             String[]       @default([])
+  published        Boolean        @default(true)
+  source           QuestionSource @default(SEED)
+  /// SHA-256 of the normalized prompt + answer. Exact-duplicate guard.
+  contentHash      String
+  /// "global" for shared bank questions, or the owner's userId for private custom cards.
+  dedupeScope      String         @default("global")
+  ownerId          String?
+  parentQuestionId String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  topic              Topic                 @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  lesson             Lesson?               @relation(fields: [lessonId], references: [id], onDelete: SetNull)
+  owner              User?                 @relation("QuestionOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  parent             Question?             @relation("QuestionVariations", fields: [parentQuestionId], references: [id], onDelete: SetNull)
+  variations         Question[]            @relation("QuestionVariations")
+  progress           QuestionProgress[]
+  reviewLogs         ReviewLog[]
+  bookmarks          Bookmark[]
+  attempts           QuestionAttempt[]
+  quizSlots          QuizAttemptQuestion[]
+  interviewResponses InterviewResponse[]
+  generatedFrom      GeneratedQuestion[]   @relation("GenerationSource")
+  generatedAs        GeneratedQuestion?    @relation("GenerationPublished")
+
+  @@unique([dedupeScope, contentHash])
+  @@index([topicId, published, difficulty])
+  @@index([type, published])
+  @@index([ownerId])
+  @@index([parentQuestionId])
+}
+
+// ───────────────────────── Per-user learning state ─────────────────────────
+
+/// One row per (user, question): spaced-repetition schedule + answer history counters.
+/// This is the "FlashcardProgress" model from the roadmap, generalised so quizzes feed the same schedule.
+model QuestionProgress {
+  id                 String        @id @default(cuid())
+  userId             String
+  questionId         String
+  repetitions        Int           @default(0)
+  intervalDays       Float         @default(0)
+  easeFactor         Float         @default(2.5)
+  lapses             Int           @default(0)
+  timesSeen          Int           @default(0)
+  timesCorrect       Int           @default(0)
+  timesIncorrect     Int           @default(0)
+  consecutiveCorrect Int           @default(0)
+  lastCorrect        Boolean?
+  lastRating         ReviewRating?
+  lastSeenAt         DateTime?
+  lastReviewedAt     DateTime?
+  nextReviewAt       DateTime?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  question Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, questionId])
+  @@index([userId, nextReviewAt])
+  @@index([userId, lastSeenAt])
+}
+
+/// Immutable log of every scheduling event (flashcard rating or graded quiz answer).
+model ReviewLog {
+  id               String       @id @default(cuid())
+  userId           String
+  questionId       String
+  rating           ReviewRating
+  kind             StudyKind
+  prevIntervalDays Float
+  newIntervalDays  Float
+  prevEaseFactor   Float
+  newEaseFactor    Float
+  /// Client-supplied key; a retried request with the same key is a no-op.
+  idempotencyKey   String?
+  reviewedAt       DateTime     @default(now())
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  question Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId, reviewedAt])
+  @@index([questionId])
+}
+
+model Bookmark {
+  userId     String
+  questionId String
+  createdAt  DateTime @default(now())
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  question Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, questionId])
+  @@index([questionId])
+}
+
+// ───────────────────────── Quizzes ─────────────────────────
+
+model QuizAttempt {
+  id               String        @id @default(cuid())
+  userId           String
+  mode             SelectionMode
+  status           QuizStatus    @default(IN_PROGRESS)
+  feedbackMode     FeedbackMode  @default(IMMEDIATE)
+  timeLimitSeconds Int?
+  /// Seed for the deterministic PRNG that picked and shuffled this quiz (reproducible for debugging).
+  seed             Int
+  topicIds         String[]      @default([])
+  difficulty       Difficulty?
+  questionCount    Int
+  correctCount     Int           @default(0)
+  gradedCount      Int           @default(0)
+  score            Float?
+  startedAt        DateTime      @default(now())
+  expiresAt        DateTime?
+  completedAt      DateTime?
+
+  user      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  questions QuizAttemptQuestion[]
+  attempts  QuestionAttempt[]
+
+  @@index([userId, startedAt])
+  @@index([userId, status])
+}
+
+/// The ordered question slots of one quiz, including the per-quiz shuffled option order.
+model QuizAttemptQuestion {
+  id              String   @id @default(cuid())
+  quizAttemptId   String
+  questionId      String
+  position        Int
+  optionOrder     String[] @default([])
+  /// Why the selector picked it: due | incorrect | weak-topic | new | fresh | fallback
+  selectionReason String
+
+  quizAttempt QuizAttempt @relation(fields: [quizAttemptId], references: [id], onDelete: Cascade)
+  question    Question    @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([quizAttemptId, position])
+  @@unique([quizAttemptId, questionId])
+}
+
+/// Every answer a user submits anywhere (quiz, flashcard, interview).
+model QuestionAttempt {
+  id              String    @id @default(cuid())
+  userId          String
+  questionId      String
+  quizAttemptId   String?
+  kind            StudyKind
+  submittedAnswer Json
+  /// null means "not objectively graded" (open-ended answer without a rubric verdict).
+  correct         Boolean?
+  feedback        String?
+  responseTimeMs  Int?
+  createdAt       DateTime  @default(now())
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  question    Question     @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  quizAttempt QuizAttempt? @relation(fields: [quizAttemptId], references: [id], onDelete: Cascade)
+
+  /// Duplicate-submission guard: one answer per question per quiz.
+  @@unique([quizAttemptId, questionId])
+  @@index([userId, createdAt])
+  @@index([userId, questionId, createdAt])
+}
+
+// ───────────────────────── Interviews ─────────────────────────
+
+model InterviewSession {
+  id          String     @id @default(cuid())
+  userId      String
+  topicId     String?
+  difficulty  Difficulty
+  startedAt   DateTime   @default(now())
+  completedAt DateTime?
+
+  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  topic     Topic?              @relation(fields: [topicId], references: [id], onDelete: SetNull)
+  responses InterviewResponse[]
+
+  @@index([userId, startedAt])
+}
+
+model InterviewResponse {
+  id               String   @id @default(cuid())
+  sessionId        String
+  questionId       String
+  response         String
+  /// Rubric checklist results: { conceptKey: boolean } self-assessed, plus keyword coverage.
+  rubricResult     Json?
+  /// AI evaluation (clearly labelled AI-generated in the UI). null when AI is not configured.
+  aiFeedback       Json?
+  aiModel          String?
+  score            Int?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  session  InterviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  question Question         @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, questionId])
+}
+
+// ───────────────────────── Study sessions ─────────────────────────
+
+model StudySession {
+  id             String    @id @default(cuid())
+  userId         String
+  kind           StudyKind
+  /// Resumable state, e.g. a flashcard queue: { questionIds, index, filters }.
+  state          Json?
+  startedAt      DateTime  @default(now())
+  lastActivityAt DateTime  @default(now())
+  endedAt        DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, startedAt])
+  @@index([userId, kind, endedAt])
+}
+
+// ───────────────────────── AI generation queue ─────────────────────────
+
+/// AI drafts live here until they pass validation AND are approved (or auto-published).
+/// Nothing in this table is ever served to learners directly.
+model GeneratedQuestion {
+  id                  String           @id @default(cuid())
+  kind                GenerationKind
+  status              GenerationStatus @default(PENDING_REVIEW)
+  topicId             String
+  sourceQuestionId    String?
+  requestedById       String?
+  model               String
+  payload             Json
+  validationReport    Json
+  contentHash         String
+  similarityScore     Float?
+  nearestQuestionId   String?
+  publishedQuestionId String?          @unique
+  reviewedById        String?
+  reviewedAt          DateTime?
+  rejectionReason     String?
+  createdAt           DateTime         @default(now())
+
+  topic             Topic     @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  sourceQuestion    Question? @relation("GenerationSource", fields: [sourceQuestionId], references: [id], onDelete: SetNull)
+  publishedQuestion Question? @relation("GenerationPublished", fields: [publishedQuestionId], references: [id], onDelete: SetNull)
+  requestedBy       User?     @relation("GenerationRequester", fields: [requestedById], references: [id], onDelete: SetNull)
+  reviewedBy        User?     @relation("GenerationReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([requestedById, createdAt])
+  @@index([contentHash])
+}

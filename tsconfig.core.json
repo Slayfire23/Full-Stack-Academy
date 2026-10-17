@@ -1,0 +1,21 @@
+{
+  "//": "Dependency-free config used by `npm run test:core` and `content:check`. Maps the 'vitest' import to a tiny node:test shim so core tests run even before `npm install`.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["es2022", "dom"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "types": [],
+    "paths": {
+      "@/*": ["./src/*"],
+      "vitest": ["./tests/shim/vitest.ts"]
+    }
+  },
+  "include": ["src/lib/**/*.ts", "content/**/*.ts", "tests/unit/**/*.ts", "tests/shim/**/*.ts", "scripts/run-core-tests.ts", "scripts/check-content.ts"]
+}
