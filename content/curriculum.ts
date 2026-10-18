@@ -26,6 +26,8 @@ export interface SeedTopic {
   title: string;
   description: string;
   lesson: SeedLesson;
+  /** Other topic slugs whose lesson should be completed before this one, enforced by the seed. */
+  prerequisiteSlugs?: string[];
 }
 
 export interface SeedTrack {
@@ -215,9 +217,19 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   },
 };
 
-const topics: SeedTopic[] = [
-  httpTopic,
-  t("rest", "REST APIs and CRUD operations", "Resource modelling, method semantics, status codes and API design conventions.", `
+const restTopic: SeedTopic = {
+  slug: "rest",
+  title: "REST APIs and CRUD operations",
+  description: "Resource modelling, method semantics, status codes and API design conventions.",
+  prerequisiteSlugs: ["http"],
+  lesson: {
+    slug: "essentials",
+    title: "REST APIs and CRUD operations: essentials",
+    level: "BEGINNER",
+    estimatedMinutes: 15,
+    summary:
+      "REST models everything as resources manipulated with HTTP's existing methods and status codes — once you know those, API design is mostly naming and consistency.",
+    content: `
 REST models a system as **resources** identified by URLs and manipulated with standard HTTP methods.
 
 - Nouns, not verbs: \`/orders\`, \`/orders/42\`, \`/orders/42/items\`.
@@ -226,8 +238,159 @@ REST models a system as **resources** identified by URLs and manipulated with st
 - Validate input at the boundary: 400 for malformed syntax, 422 for semantically invalid data, 409 for conflicts with current state.
 - Lists are paginated and filterable; never return unbounded collections.
 - Enforce ownership on every resource lookup — authentication alone is not authorization.
-`),
-  t("js-ts", "JavaScript and TypeScript backend fundamentals", "Runtime vs compile-time guarantees, numbers, immutability and safe typing of untrusted data.", `
+`.trim(),
+    explanation: `
+## Resources, not actions
+
+REST (Representational State Transfer) models a system as **resources** — nouns — identified by URLs, manipulated with the small set of HTTP methods you already know. Instead of inventing a new verb for every operation (\`/getOrder\`, \`/cancelOrder\`), you expose a resource (\`/orders/42\`) and let the HTTP method say what to do to it.
+
+- \`GET /orders\` — list orders (query parameters filter and page them)
+- \`GET /orders/42\` — read one order
+- \`POST /orders\` — create an order (**201 Created**, with a \`Location\` header)
+- \`PUT /orders/42\` — replace it wholesale
+- \`PATCH /orders/42\` — modify part of it
+- \`DELETE /orders/42\` — remove it (**204 No Content**, usually)
+
+## Naming resources
+
+- Use plural nouns: \`/orders\`, not \`/order\`.
+- Nest only to express real ownership: \`/orders/42/items\`, not many levels of nested ids.
+- An action that is not plain CRUD still gets a noun: cancelling an order is \`POST /orders/42/cancellation\`, not \`POST /orders/42/cancel\`.
+
+## Status codes, applied to CRUD
+
+The same status-code families from HTTP Fundamentals, mapped onto CRUD specifically:
+
+- **201 Created** for a successful POST, with \`Location\` pointing at the new resource.
+- **200 OK** for a read, or a PUT/PATCH that returns the updated resource.
+- **204 No Content** for a PUT/PATCH/DELETE that returns nothing.
+- **404 Not Found** for an id that does not exist, *or belongs to someone else* — never reveal which.
+- **409 Conflict** when the request conflicts with the resource's *current state* (a stale version, a duplicate unique value, cancelling an order that has already shipped).
+- **422 Unprocessable Content** when the body is well-formed JSON but fails a validation or business rule.
+- **400 Bad Request** is still for syntactically broken input (malformed JSON) — a step earlier than either 409 or 422.
+
+## Pagination and filtering
+
+Never return an entire table. List endpoints accept filters (\`?status=draft\`) and are paginated. Cursor-based pagination (\`?cursor=...&limit=20\`) scales better than offset/page numbers once a table is large and being written to concurrently, because an offset shifts under you as rows are inserted or deleted between pages, while a cursor (a pointer to the last-seen row) does not. The Pagination, filtering, and sorting topic goes deeper into offset vs cursor pagination and stable ordering.
+
+## Idempotency and retries
+
+GET, PUT and DELETE are idempotent (RFC 9110): repeating them has the same effect as doing them once, so a client can safely retry them after a timeout. POST and PATCH are not — retrying a timed-out "create order" POST can create two orders. For actions that must not double-apply, accept a client-generated \`Idempotency-Key\` header and store it: a replay with the same key returns the original result instead of creating a second one.
+
+## Versioning
+
+A public API is a promise to its callers. Changing a field's type or removing a field is a breaking change. Evolve additively where you can (add a new field alongside the old one); reach for a new version (\`/v2\`, or a version header) only when you must, and remove the old behaviour only after usage data shows it is safe.
+`.trim(),
+    realWorldExample: `
+Consider an order-processing API.
+
+**Listing, paginated:**
+\`\`\`http
+GET /orders?status=draft&limit=20 HTTP/1.1
+Authorization: Bearer <token>
+\`\`\`
+\`\`\`http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"items": [{"id": "42", "status": "draft"}], "nextCursor": "42"}
+\`\`\`
+
+**Creating, safe to retry:**
+\`\`\`http
+POST /orders HTTP/1.1
+Idempotency-Key: 6f1c2a3e-9b7d-4e2a-9c1a-2f3e4d5c6b7a
+Content-Type: application/json
+
+{"productId": "sku_42", "quantity": 2}
+\`\`\`
+\`\`\`http
+HTTP/1.1 201 Created
+Location: /orders/42
+\`\`\`
+A retry of that exact request (same \`Idempotency-Key\`, after a dropped response) returns the same \`201\` and the same order — not a second one.
+
+**Cancelling, state-checked:**
+\`\`\`http
+POST /orders/42/cancellation HTTP/1.1
+\`\`\`
+If the order already shipped, the state itself is what's wrong, not the request's syntax:
+\`\`\`http
+HTTP/1.1 409 Conflict
+Content-Type: application/json
+
+{"error": {"message": "Order has already shipped", "code": "conflict"}}
+\`\`\`
+`.trim(),
+    codeExample: `
+import { NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
+
+// GET /api/orders?cursor=...&limit=20 — paginated, and scoped to the caller.
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const limit = Math.min(Number(searchParams.get("limit") ?? 20), 50);
+  const cursor = searchParams.get("cursor") ?? undefined;
+  const userId = await requireUserId(req);
+
+  const orders = await db.order.findMany({
+    where: { userId }, // ownership: "not found" and "not yours" must look the same
+    orderBy: { id: "asc" },
+    take: limit + 1,
+    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+  });
+  const hasMore = orders.length > limit;
+  const items = orders.slice(0, limit);
+  return NextResponse.json({ items, nextCursor: hasMore ? (items.at(-1)?.id ?? null) : null });
+}
+
+// POST /api/orders — not idempotent by default, so a retried request needs a key.
+export async function POST(req: Request) {
+  const userId = await requireUserId(req);
+  const idempotencyKey = req.headers.get("idempotency-key");
+  const body = await req.json();
+
+  try {
+    const order = await db.order.create({
+      data: { userId, productId: body.productId, quantity: body.quantity, idempotencyKey },
+    });
+    return NextResponse.json(order, { status: 201, headers: { Location: \`/orders/\${order.id}\` } });
+  } catch (err) {
+    // A unique constraint on (userId, idempotencyKey) — not a check-then-create read — is what
+    // actually prevents a duplicate: two concurrent retries can both pass a "does this key
+    // exist?" check before either has written, but only one INSERT can win the constraint.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002" && idempotencyKey) {
+      const existing = await db.order.findUnique({ where: { userId_idempotencyKey: { userId, idempotencyKey } } });
+      if (existing) return NextResponse.json(existing, { status: 201 }); // the winner's result, not an error
+    }
+    throw err;
+  }
+}
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Verbs in the URL.** \`/getOrder\`, \`/cancelOrder\` fight the protocol — the HTTP method already says what to do; keep the path a noun.
+- **Returning everything from a list endpoint.** An unpaginated \`/orders\` is fine with 10 rows and a production incident with 10 million.
+- **Trusting the client for ownership.** Checking that a token is valid is authentication; separately checking \`WHERE user_id = $1\` is authorization — see the Authentication and Authorization lesson.
+- **Picking 409 vs 422 vs 400 by feel.** 400 is for syntax, 422 is for a validatable body that breaks a rule, 409 is for conflicting with the resource's current state. Mixing these up makes client error-handling guesswork.
+- **Treating POST as safe to retry.** Without an idempotency key, a network retry of a timed-out "create" can create a duplicate.
+- **Breaking public clients to "clean up" a field.** Changing a field's type or meaning in place breaks every caller that can't upgrade on your schedule; add alongside, version, deprecate, then remove.
+`.trim(),
+  },
+};
+
+const jsTsTopic: SeedTopic = {
+  slug: "js-ts",
+  title: "JavaScript and TypeScript backend fundamentals",
+  description: "Runtime vs compile-time guarantees, numbers, immutability and safe typing of untrusted data.",
+  lesson: {
+    slug: "essentials",
+    title: "JavaScript and TypeScript backend fundamentals: essentials",
+    level: "BEGINNER",
+    estimatedMinutes: 15,
+    summary:
+      "TypeScript's types vanish at compile time, so anything crossing a trust boundary needs real runtime validation — plus a few JavaScript quirks (numbers, mutability, sorting) that bite backend code specifically.",
+    content: `
 TypeScript adds a static type system that is **erased** at compile time. Everything that crosses a trust boundary — request bodies, environment variables, database JSON, third-party responses — must be validated at runtime.
 
 \`\`\`ts
@@ -237,8 +400,133 @@ const parsed = CreateOrder.safeParse(await req.json());
 \`\`\`
 
 Other essentials: prefer \`unknown\` over \`any\` for untrusted values; \`const\` prevents rebinding, not mutation; numbers are IEEE 754 doubles, so store money as integer cents or a decimal type; and \`Array.prototype.sort\` compares strings unless you pass a comparator.
-`),
-  t("node-async", "Node.js and asynchronous programming", "The event loop, promises, concurrency and keeping the main thread free.", `
+`.trim(),
+    explanation: `
+## Types are a compile-time promise, not a runtime guard
+
+TypeScript's type system is **erased** when compiled to JavaScript — none of it exists at runtime. \`function handler(body: CreateOrder)\` does not check anything about the actual value passed in; it is a note to the compiler and to other programmers. A request body, a database JSON column, an environment variable, or a third-party API response can be anything at runtime, no matter what you have typed it as.
+
+\`\`\`ts
+const body = req.body as CreateOrder; // compiles — proves nothing
+\`\`\`
+
+This \`as\` is a *cast*: you are telling the compiler to trust you, not validating anything. Whatever the real JSON contains reaches your code unchanged.
+
+## Validate at the boundary
+
+Any value crossing a trust boundary (HTTP body, query string, environment variable, webhook payload) should be parsed with a runtime validator — this project uses Zod — and the *static* type should be inferred from that same schema, so the two can never drift apart:
+
+\`\`\`ts
+const CreateOrder = z.object({ productId: z.string(), quantity: z.number().int().positive() });
+type CreateOrder = z.infer<typeof CreateOrder>; // one source of truth
+const parsed = CreateOrder.safeParse(await req.json());
+\`\`\`
+
+\`safeParse\` also strips unknown keys by default, which blocks **mass assignment** — a client sneaking in \`role: "admin"\` on a profile-update request.
+
+## \`unknown\` vs \`any\`
+
+\`any\` turns off type-checking for a value and lets that unsafety spread to everything it touches. \`unknown\` accepts anything but forces you to narrow it (a \`typeof\` check, a schema parse) before you can use it. Prefer \`unknown\` for anything untrusted — parsed JSON, a caught error in a \`catch\` block — so the compiler makes you prove the shape before you rely on it.
+
+## \`const\` is not immutability
+
+\`const\` only prevents *reassigning the binding* — it says nothing about the value itself:
+
+\`\`\`ts
+const order = { status: "new" };
+order.status = "paid"; // perfectly legal
+\`\`\`
+
+TypeScript's \`readonly\` and \`as const\` are compile-time-only annotations; plain JavaScript (or a cast) can still write the property. \`Object.freeze\` is the one that actually stops a write at runtime — and only shallowly. Whether a write to a frozen object's property raises an error depends on strict mode: in strict mode it throws a \`TypeError\`; otherwise the assignment is silently ignored, and execution continues as if it had succeeded. Backend code is strict by default — every ES module and every \`class\` body is always strict — so this is usually the \`TypeError\` case, but it's worth knowing the silent-failure mode exists.
+
+## Numbers are IEEE 754 doubles
+
+\`0.1 + 0.2 === 0.3\` is \`false\` because neither 0.1 nor 0.2 has an exact binary floating-point representation; the real sum is \`0.30000000000000004\`. That is irrelevant for most values, but fatal for money: never store currency as a JavaScript \`number\`. Store integer minor units (cents) or use a decimal type/library, and let PostgreSQL's \`NUMERIC\` (not \`FLOAT\`) hold the authoritative value.
+
+## \`Array.prototype.sort\` compares strings by default
+
+Without a comparator, \`sort\` converts elements to strings and compares them in UTF-16 code-unit order — so numbers sort like text (\`"10"\` before \`"9"\`). Always pass a comparator for anything other than plain strings: \`(a, b) => a - b\` for ascending numbers.
+`.trim(),
+    realWorldExample: `
+Consider a \`PATCH /api/profile\` endpoint that lets a signed-in user update their own name and email.
+
+**The unsafe version:**
+\`\`\`ts
+export async function PATCH(req: Request) {
+  const body = (await req.json()) as { name?: string; email?: string; role?: string };
+  const user = await requireSession(req);
+  return db.user.update({ where: { id: user.id }, data: body }); // body.role sneaks through
+}
+\`\`\`
+The cast makes TypeScript happy and checks nothing. A crafted request body with \`{"name": "Ada", "role": "ADMIN"}\` writes \`role\` straight to the database — the server never decided to grant admin, the client did.
+
+**Validated:**
+\`\`\`ts
+const UpdateProfile = z.object({ name: z.string().min(1).max(80).optional(), email: z.string().email().optional() });
+
+export async function PATCH(req: Request) {
+  const user = await requireSession(req);
+  const parsed = UpdateProfile.safeParse(await req.json());
+  if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 422 });
+  return NextResponse.json(await db.user.update({ where: { id: user.id }, data: parsed.data }));
+}
+\`\`\`
+\`role\` is not in the schema, so \`safeParse\` drops it even if a client sends it — the only way to become an admin is through a path the server itself controls.
+
+**Money, in the same codebase:**
+\`\`\`ts
+// Wrong: floats accumulate error.
+const total = 19.99 + 5.0; // 24.990000000000002 after enough of these
+
+// Right: integer cents.
+const totalCents = 1999 + 500; // 2499, exact every time
+\`\`\`
+`.trim(),
+    codeExample: `
+import { z } from "zod";
+
+function parseEnv<S extends z.ZodTypeAny>(schema: S, raw: Record<string, string | undefined>): z.output<S> {
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error(\`Invalid environment: \${JSON.stringify(parsed.error.flatten().fieldErrors)}\`);
+  }
+  return parsed.data;
+}
+
+// process.env is typed as Record<string, string | undefined>, but nothing stops a deploy
+// that forgot to set AUTH_SECRET — the type alone does not catch a missing value.
+const Env = z.object({
+  DATABASE_URL: z.string().url(),
+  AUTH_SECRET: z.string().min(32),
+  PORT: z.coerce.number().int().positive().default(3000),
+});
+export const env = parseEnv(Env, process.env);
+// Fails fast at startup with a clear error, instead of a confusing crash deep in a request handler.
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Casting instead of validating.** \`req.body as CreateOrder\` satisfies the compiler and nothing else; always parse with a schema at the boundary.
+- **Reaching for \`any\` to make an error go away.** \`any\` does not just skip checking that one value — the unsafety spreads to everything derived from it. Use \`unknown\` and narrow instead.
+- **Assuming \`const\`/\`readonly\` protects an object.** Both are compile-time only; a cast or plain JavaScript can still mutate the value. Use \`Object.freeze\` for an actual runtime guarantee (and remember it is shallow).
+- **Storing money as a JavaScript \`number\`.** Floating-point rounding will eventually produce a total that is a cent off. Use integer cents or a decimal type end to end, including in the database.
+- **Sorting numbers without a comparator.** \`[10, 9, 1].sort()\` is \`[1, 10, 9]\`, not \`[1, 9, 10]\` — \`sort\` defaults to string comparison.
+`.trim(),
+  },
+};
+
+const nodeAsyncTopic: SeedTopic = {
+  slug: "node-async",
+  title: "Node.js and asynchronous programming",
+  description: "The event loop, promises, concurrency and keeping the main thread free.",
+  prerequisiteSlugs: ["js-ts"],
+  lesson: {
+    slug: "essentials",
+    title: "Node.js and asynchronous programming: essentials",
+    level: "INTERMEDIATE",
+    estimatedMinutes: 18,
+    summary:
+      "Node runs your JavaScript on one thread; the event loop keeps that thread free by handing I/O to the operating system and resuming your code when it's ready — understanding that one fact explains most Node.js performance bugs.",
+    content: `
 Node.js runs JavaScript on **one main thread**. I/O is handed to the operating system and completes via callbacks, so a single process can serve many concurrent requests — as long as nothing blocks the event loop.
 
 - CPU-heavy work (large parsing, compression, password hashing in tight loops) blocks every request: move it to a worker or background job.
@@ -246,8 +534,129 @@ Node.js runs JavaScript on **one main thread**. I/O is handed to the operating s
 - \`Promise.all\` fails fast; \`Promise.allSettled\` reports every outcome.
 - Unhandled promise rejections crash the process in modern Node — always await or catch.
 - Microtasks (promise callbacks, \`process.nextTick\`) run before the next timer or I/O callback.
-`),
-  t("auth", "Authentication and authorization", "Passwords, sessions vs tokens, cookies and object-level access control.", `
+`.trim(),
+    explanation: `
+## One thread, non-blocking I/O
+
+Node.js runs your JavaScript on a **single main thread**. When you call a database query, read a file or make an HTTP request, Node hands that work to the operating system (or a background thread pool, for some APIs) and moves on; your callback or \`await\` resumes once the result is ready. This is why one Node process can serve many concurrent requests — as long as nothing holds the main thread hostage.
+
+## What actually blocks the event loop
+
+I/O does not block it. **Synchronous CPU work does**: parsing a huge JSON payload, a tight hashing loop, image resizing, a large synchronous regular expression. While that code runs, nothing else does — no other request's callback, no timer, nothing — until it returns. Move CPU-bound work off the main thread (\`worker_threads\`, a separate worker process, or a job queue) instead of doing it inline in a request handler.
+
+## Promises and \`async\`/\`await\`
+
+\`async\`/\`await\` is syntax over promises, not a different mechanism. Two things worth being precise about:
+
+- **\`Promise.all\`** runs its inputs concurrently and rejects as soon as the *first* one rejects — the others keep running, but their results are discarded. Use it when every result is required and any single failure should fail the whole operation.
+- **\`Promise.allSettled\`** waits for all of them and reports each as fulfilled or rejected. Use it for independent work (for example, sending three notifications) where a partial failure should be reported, not treated as total failure.
+
+\`await\` inside a loop runs sequentially — each iteration waits for the previous one to finish. That is correct when a step genuinely depends on the last one's result, but for independent work it means N round trips instead of one concurrent batch: map to an array of promises and \`Promise.all\` them instead (with a concurrency cap for very large N — unlimited concurrency can exhaust a database connection pool, below).
+
+## Unhandled rejections are fatal
+
+Since Node.js 15, an unhandled promise rejection is treated like an uncaught exception by default: it crashes the process. A forgotten \`await\`, or a \`.then()\` with no \`.catch\`, can take the whole server down. Always await or return promises, and catch at your boundaries (a route wrapper, a top-level handler).
+
+## Microtasks, macrotasks and \`process.nextTick\`
+
+Within one pass of synchronous code, Node drains its \`process.nextTick\` queue, then the promise microtask queue, before moving on to the next event-loop phase (timers, I/O callbacks). In practice: promise callbacks and \`nextTick\` callbacks always run before a \`setTimeout(() => ..., 0)\` callback does, even one scheduled first. The exact ordering between \`nextTick\` and promise microtasks is an implementation detail you should not depend on — what matters is that *both* run before timers and I/O.
+`.trim(),
+    realWorldExample: `
+An admin uploads a 50,000-row CSV to import products. The naive handler:
+
+\`\`\`ts
+export async function POST(req: Request) {
+  const text = await req.text();
+  const rows = parseCsv(text); // 50,000 rows, fully in memory
+  for (const row of rows) {
+    await db.product.create({ data: row }); // one request at a time, serially
+  }
+  return new Response("done");
+}
+\`\`\`
+This blocks the event loop while parsing the whole file synchronously, then makes 50,000 *sequential* database round trips — every other request on this server waits behind it, for minutes.
+
+**Accepted immediately, done in the background, in batches:**
+\`\`\`ts
+export async function POST(req: Request) {
+  const file = await req.blob();
+  const job = await db.importJob.create({ data: { status: "PENDING" } });
+  await queue.enqueue("import-csv", { jobId: job.id, fileKey: await storeFile(file) });
+  return NextResponse.json({ jobId: job.id }, { status: 202 }); // Accepted — work continues elsewhere
+}
+
+// In the worker, off the request path:
+async function processImport(jobId: string, fileKey: string) {
+  const BATCH = 500;
+  let batch: ProductRow[] = [];
+  for await (const row of streamCsvRows(fileKey)) { // stream, never load 50,000 rows into memory at once
+    batch.push(row);
+    if (batch.length === BATCH) {
+      await db.product.createMany({ data: batch, skipDuplicates: true }); // one round trip per batch
+      batch = [];
+    }
+  }
+  if (batch.length) await db.product.createMany({ data: batch, skipDuplicates: true });
+  await db.importJob.update({ where: { id: jobId }, data: { status: "DONE" } });
+}
+\`\`\`
+Streaming avoids loading the whole file into memory, batching turns 50,000 round trips into 100, and a unique constraint plus \`skipDuplicates\` (or an upsert) makes a retried job safe to run twice.
+`.trim(),
+    codeExample: `
+// Unbounded concurrency can exhaust a database connection pool or overwhelm an API.
+async function saveAllUnsafe(rows: Row[]) {
+  await Promise.all(rows.map((r) => db.row.create({ data: r }))); // all 10,000 start at once
+}
+
+// A small concurrency limit keeps a bounded number of operations in flight.
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]!);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+async function saveAllSafely(rows: Row[]) {
+  return mapWithConcurrency(rows, 10, (r) => db.row.create({ data: r })); // at most 10 in flight
+}
+
+// Independent work where a partial failure should be reported, not treated as total failure:
+async function notifyAll(userIds: string[]) {
+  const outcomes = await Promise.allSettled(userIds.map((id) => sendNotification(id)));
+  const failed = outcomes.filter((o) => o.status === "rejected").length;
+  if (failed > 0) log.warn(\`\${failed} of \${userIds.length} notifications failed\`);
+}
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Doing CPU-heavy work inline in a request handler.** It blocks the event loop for everyone, not just the caller — move it to a worker or background job.
+- **Unbounded \`Promise.all\` over a large array.** \`Promise.all(rows.map(saveRow))\` for 10,000 rows starts 10,000 database operations at once; cap concurrency or batch instead.
+- **Awaiting independent work sequentially in a loop.** Correct when each step depends on the last, but a serial loop over independent operations is N round trips when one concurrent batch would do.
+- **Forgetting to catch a promise.** An unhandled rejection crashes the process in modern Node — always await/catch, especially at a handler's top level.
+- **Relying on exact \`nextTick\`-vs-microtask ordering.** Both run before timers and I/O, but the relative order between them is an implementation detail, not a contract.
+`.trim(),
+  },
+};
+
+const authTopic: SeedTopic = {
+  slug: "auth",
+  title: "Authentication and authorization",
+  description: "Passwords, sessions vs tokens, cookies and object-level access control.",
+  prerequisiteSlugs: ["rest"],
+  lesson: {
+    slug: "essentials",
+    title: "Authentication and authorization: essentials",
+    level: "INTERMEDIATE",
+    estimatedMinutes: 18,
+    summary:
+      "Authentication proves who someone is; authorization decides what they can do — conflating the two, or checking only the first, is the single most common way APIs leak other people's data.",
+    content: `
 **Authentication** proves identity; **authorization** decides access.
 
 - Store passwords with Argon2id, scrypt or bcrypt — slow, salted, designed for passwords.
@@ -255,7 +664,119 @@ Node.js runs JavaScript on **one main thread**. I/O is handed to the operating s
 - JWTs: signed, readable claims. Stateless and scalable, but valid until expiry unless you add revocation. Keep them short-lived and pair them with rotating refresh tokens.
 - Authorize **every object access**: \`WHERE id = $1 AND owner_id = $2\`. Never trust ids from the client to decide ownership.
 - Protect login with throttling, generic errors (no account enumeration) and MFA.
-`),
+`.trim(),
+    explanation: `
+## Two different questions
+
+**Authentication** answers "who is this?" — usually a password check, resulting in a session or token. **Authorization** answers "is this identity allowed to do *this*, to *this* resource?" — checked on every single request, for every single resource. A system can authenticate flawlessly and still leak everyone's data if it forgets the second question on just one endpoint.
+
+## Storing passwords
+
+Hash passwords with a slow, salted, password-specific algorithm — Argon2id, scrypt or bcrypt. Never store them in plain text, never "encrypt" them reversibly, and never use a fast general-purpose hash like SHA-256 alone: those are built for speed, which is exactly wrong for passwords, since it makes offline brute-forcing a leaked database cheap. Verify with the library's own compare function (it handles timing safely) and re-hash on a successful login when you raise the cost factor.
+
+## Sessions vs tokens
+
+- **Sessions**: the cookie holds a random, unguessable id; the actual state (user id, roles) lives server-side (database, Redis). Revoking access is a single delete. The cookie should be \`HttpOnly\` (JavaScript cannot read it, limiting what a successful XSS can steal), \`Secure\` (HTTPS only) and \`SameSite=Lax\` or \`Strict\` (not sent on most cross-site requests, reducing CSRF).
+- **JWTs**: a signed token carrying its own claims, verified without a database lookup — stateless and cheap to scale. The trade-off is revocation: a valid JWT stays valid until it expires, because nothing is looked up. The payload is also only **base64url-encoded, not encrypted** — anyone holding the token can read the claims, so never put secrets or sensitive personal data in them. Keep access tokens short-lived (minutes), pair them with a rotating refresh token, and if you need to revoke before expiry, reintroduce a small amount of server state (a token version or denylist checked on each request).
+
+## Authorization: check it on every resource, every time
+
+Authenticating a request tells you who is asking. It says nothing about whether they may see order 42. The classic failure (broken object-level authorization, or IDOR) looks like this: a logged-in user changes \`/api/orders/123\` to \`/api/orders/124\` in the URL and sees someone else's order, because the endpoint checked "is there a valid session?" and stopped — it never checked that order 124 belongs to this caller. Scope every lookup explicitly: \`WHERE id = $1 AND user_id = $2\`, and return 404 (not 403) when the row does not match, so a caller cannot tell "does not exist" apart from "exists, but is not yours."
+
+In a multi-tenant system the same idea applies one level up: every tenant-owned row carries a \`tenant_id\` derived from the authenticated session (never from a request parameter), and ideally every query is scoped centrally (a repository layer, or PostgreSQL row-level security as defence in depth) so an individual endpoint cannot forget the filter.
+
+## Protecting the login endpoint itself
+
+Login is a target in its own right. Rate-limit by account *and* by IP, with backoff rather than a permanent lockout (a hard lockout lets an attacker deny service to a real user just by trying their account repeatedly). Return the same error and similar timing for "no such account" and "wrong password," so failed attempts cannot be used to enumerate which emails have accounts. Password resets need single-use, short-lived, randomly generated tokens, stored hashed like passwords — never derived from guessable data like a user id and timestamp — with the same account-enumeration-safe response either way.
+`.trim(),
+    realWorldExample: `
+A simple login and protected-resource flow.
+
+**Logging in** sets an HttpOnly session cookie:
+\`\`\`http
+POST /api/login HTTP/1.1
+Content-Type: application/json
+
+{"email": "ada@example.com", "password": "correct horse battery staple"}
+\`\`\`
+\`\`\`http
+HTTP/1.1 200 OK
+Set-Cookie: session=9f1c2a3e...; HttpOnly; Secure; SameSite=Lax; Path=/
+\`\`\`
+
+**Reading your own order** — the session proves who is asking, but the query still scopes by owner:
+\`\`\`http
+GET /api/orders/42 HTTP/1.1
+Cookie: session=9f1c2a3e...
+\`\`\`
+If order 42 belongs to a different user, the correct response is the same as if it did not exist at all:
+\`\`\`http
+HTTP/1.1 404 Not Found
+\`\`\`
+not a 403 — a 403 would confirm that *something* is at that id, which is itself information leakage.
+
+**The vulnerable version** of that handler only checks that a session exists:
+\`\`\`ts
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const user = await requireSession(req); // proves *who*, not *what they can see*
+  const order = await db.order.findUnique({ where: { id } }); // missing owner filter
+  if (!order) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  return NextResponse.json(order); // leaks any user's order to any logged-in user
+}
+\`\`\`
+
+**The fixed version** folds ownership into the query itself, so there is no separate step to forget:
+\`\`\`ts
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const user = await requireSession(req);
+  const order = await db.order.findFirst({ where: { id, userId: user.id } });
+  if (!order) return NextResponse.json({ error: "Not found" }, { status: 404 }); // same 404 either way
+  return NextResponse.json(order);
+}
+\`\`\`
+`.trim(),
+    codeExample: `
+import bcrypt from "bcryptjs";
+
+export async function registerUser(email: string, password: string) {
+  const passwordHash = await bcrypt.hash(password, 12); // cost factor 12: slow by design
+  return db.user.create({ data: { email, passwordHash } });
+}
+
+export async function login(email: string, password: string, ip: string) {
+  // Rate-limit by account *and* IP, before touching the database.
+  if (!loginLimiter.check(\`\${email}|\${ip}\`).allowed) throw new HttpError(429, "Too many attempts");
+
+  const user = await db.user.findUnique({ where: { email } });
+  // Compare against a dummy hash for unknown emails too, so response time does not itself
+  // reveal whether the account exists.
+  const hashToCheck = user?.passwordHash ?? DUMMY_HASH;
+  const valid = await bcrypt.compare(password, hashToCheck);
+  if (!user || !valid) throw new HttpError(401, "Invalid email or password"); // identical message either way
+
+  return createSession(user.id); // random session id; server holds the real state
+}
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Checking authentication and calling it done.** A valid session or token only proves *who*; every resource lookup still needs its own ownership/authorization check.
+- **Returning 403 instead of 404 for someone else's resource.** A 403 confirms the resource exists; a 404 reveals nothing. Make "not yours" look identical to "does not exist."
+- **Treating a JWT's payload as private.** It is signed, not encrypted — anyone holding the token can read the claims. Never put secrets in it.
+- **Hard-locking accounts after failed logins.** It becomes a denial-of-service tool against real users. Use rate limiting with backoff instead.
+- **Letting "forgot password" or login responses reveal whether an email is registered.** Return the same response and similar timing either way.
+- **Deriving a password-reset token from guessable data** (a user id and timestamp) instead of a long random value stored hashed.
+`.trim(),
+  },
+};
+
+const topics: SeedTopic[] = [
+  httpTopic,
+  restTopic,
+  jsTsTopic,
+  nodeAsyncTopic,
+  authTopic,
   t("postgres", "PostgreSQL and relational databases", "Tables, keys, constraints, NULL semantics, ACID and reading query plans.", `
 Relational databases enforce structure and **invariants**. Push rules into the schema wherever possible: primary keys, foreign keys, UNIQUE, NOT NULL and CHECK constraints are enforced for every writer, including scripts and future services.
 

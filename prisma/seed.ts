@@ -61,6 +61,20 @@ async function main() {
     lessonIds.set(t.slug, lesson.id);
   }
 
+  // Prerequisites: declared by topic slug in content/curriculum.ts, resolved to lesson ids here.
+  // createMany + skipDuplicates keeps this idempotent (the composite PK already forbids repeats).
+  const prereqRows: { lessonId: string; prerequisiteId: string }[] = [];
+  for (const t of curriculum.topics) {
+    const lessonId = lessonIds.get(t.slug);
+    if (!lessonId || !t.prerequisiteSlugs) continue;
+    for (const slug of t.prerequisiteSlugs) {
+      const prerequisiteId = lessonIds.get(slug);
+      if (prerequisiteId) prereqRows.push({ lessonId, prerequisiteId });
+    }
+  }
+  const prereqResult =
+    prereqRows.length > 0 ? await prisma.lessonPrerequisite.createMany({ data: prereqRows, skipDuplicates: true }) : { count: 0 };
+
   let created = 0;
   let updated = 0;
   for (const q of allQuestions) {
@@ -122,7 +136,8 @@ async function main() {
 
   console.log(
     `Seed complete: ${tracks.length} tracks, ${curriculum.topics.length} topics, ` +
-      `${created} questions created, ${updated} updated, ${retired.count} retired.`,
+      `${created} questions created, ${updated} updated, ${retired.count} retired, ` +
+      `${prereqResult.count} lesson prerequisites added.`,
   );
 }
 
