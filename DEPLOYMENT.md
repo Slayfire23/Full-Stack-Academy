@@ -2,18 +2,21 @@
 
 Not yet deployed: no hosting or database credentials were available when this was built. These are the intended steps.
 
-## Option A — Vercel + managed PostgreSQL
+## Option A — Vercel + Supabase
 
-1. **Database.** Create a PostgreSQL 15+ database with any Prisma-compatible provider (Neon, Supabase, AWS RDS, Railway, Render…). Copy two connection strings if the provider offers a pooler:
-   - pooled URL (PgBouncer / pooler) → `DATABASE_URL`, with `?pgbouncer=true&connection_limit=1` for serverless functions;
-   - direct URL → `DIRECT_URL`, for migrations. When you use a pooler, add `directUrl = env("DIRECT_URL")` to the `datasource` block in `prisma/schema.prisma` and commit.
+This project's `prisma/schema.prisma` already declares `directUrl = env("DIRECT_URL")`, and `vercel.json` pins functions to `pdx1` (Portland, Oregon) so they run in the same region as a Supabase database hosted in `us-west-2` — set both env vars below, and host the database in `us-west-2` (or repick the region to match wherever yours actually lives).
+
+1. **Database connection strings.** Supabase gives you two poolers for the same database; use both, for different jobs:
+   - transaction pooler (port 6543) → `DATABASE_URL`, with `?pgbouncer=true&connection_limit=1` — short-lived connections for serverless function invocations;
+   - session pooler (port 5432) → `DIRECT_URL` — migrations and seeding need a session-level connection, which a transaction pooler can't give them.
 2. **Migrate and seed** from your machine against the production database (once, and after every schema change):
    ```powershell
-   $env:DATABASE_URL="<direct production url>"; npm run db:deploy; npm run db:seed; Remove-Item Env:DATABASE_URL
+   $env:DATABASE_URL="<session pooler url>"; npm run db:deploy; npm run db:seed; Remove-Item Env:DATABASE_URL
    ```
-   (bash: `DATABASE_URL="<url>" npm run db:deploy && DATABASE_URL="<url>" npm run db:seed`). Alternatively set the Vercel build command to `npm run db:deploy && npm run build` so every deploy applies pending migrations first.
+   (bash: `DATABASE_URL="<session pooler url>" npm run db:deploy && DATABASE_URL="<session pooler url>" npm run db:seed`). Alternatively set the Vercel build command to `npm run db:deploy && npm run build` so every deploy applies pending migrations first — in that case give the build step `DATABASE_URL` set to the session pooler too, since `prisma migrate deploy` needs the same session-level connection.
 3. **Vercel project.** Import the Git repository. Framework preset: Next.js. Build command: `npm run build`. Environment variables (Production and Preview):
-   - `DATABASE_URL` (and `DIRECT_URL` if used)
+   - `DATABASE_URL` — Supabase transaction pooler, port 6543, `?pgbouncer=true&connection_limit=1`
+   - `DIRECT_URL` — Supabase session pooler, port 5432
    - `AUTH_SECRET` — a new random value, not your local one
    - `AUTH_TRUST_HOST=true`
    - optional: `AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL`, `AI_AUTO_PUBLISH`, `AI_GENERATION_HOURLY_LIMIT`
@@ -24,7 +27,7 @@ Not yet deployed: no hosting or database credentials were available when this wa
 ### Serverless caveats
 
 - In-memory rate limits are per function instance (best-effort). For strict limits, back `SlidingWindowLimiter` with Redis (e.g. Upstash). The AI quota is database-backed and already exact.
-- Keep the database in the same region as the functions.
+- `vercel.json`'s `regions` pins functions to one region — keep it matched to wherever the database actually lives, since every request round-trips to it.
 
 ## Option B — Docker
 

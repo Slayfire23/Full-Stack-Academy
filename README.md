@@ -151,7 +151,8 @@ All variables are documented in [`.env.example`](.env.example).
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | yes | PostgreSQL connection string for the app — **Supabase** in this project, with real data. |
+| `DATABASE_URL` | yes | PostgreSQL connection string for the app — **Supabase** in this project, with real data. In production, the transaction pooler (port 6543, `?pgbouncer=true&connection_limit=1`). |
+| `DIRECT_URL` | production | Supabase session pooler (port 5432), used by `prisma migrate deploy` / `db:seed` — a transaction pooler can't hold the session-level connection migrations need. Locally, `DATABASE_URL` is already a direct connection, so this is unused. |
 | `DATABASE_URL_TEST` | for tests | A separate, local Docker database for integration and constraint tests. **Its data is deleted** by the tests. Must never point at Supabase. |
 | `AUTH_SECRET` | yes | Signs session tokens. 32+ random bytes. |
 | `AUTH_TRUST_HOST` | production | `true` behind Vercel or a trusted proxy. |
@@ -225,7 +226,7 @@ docker/           init-test-db.sql — creates the local test/shadow databases o
 
 ## Deployment
 
-See [DEPLOYMENT.md](DEPLOYMENT.md) for Vercel + managed PostgreSQL and for the Docker image. Not yet deployed.
+See [DEPLOYMENT.md](DEPLOYMENT.md) for Vercel + Supabase and for the Docker image. Not yet deployed. In short: set `DATABASE_URL` to Supabase's transaction pooler (port 6543, `?pgbouncer=true&connection_limit=1`) and `DIRECT_URL` to its session pooler (port 5432, used for migrations and seeding) as Vercel env vars; `prisma/schema.prisma` already declares `directUrl`, and `vercel.json` pins functions to the `pdx1` region to match the database.
 
 ## Troubleshooting
 
