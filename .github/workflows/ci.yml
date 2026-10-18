@@ -25,6 +25,7 @@ jobs:
     env:
       CI: "true"
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/full_stack_academy?schema=public
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/full_stack_academy?schema=public
       DATABASE_URL_TEST: postgresql://postgres:postgres@localhost:5432/full_stack_academy_test?schema=public
       SHADOW_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/full_stack_academy_shadow?schema=public
       AUTH_SECRET: ci-only-secret-not-used-anywhere-else-0123456789
@@ -45,7 +46,7 @@ jobs:
       - name: Migrate
         run: |
           npx prisma migrate deploy
-          DATABASE_URL=$DATABASE_URL_TEST npx prisma migrate deploy
+          DATABASE_URL=$DATABASE_URL_TEST DIRECT_URL=$DATABASE_URL_TEST npx prisma migrate deploy
       - name: Schema drift check (migrations match schema.prisma)
         run: npx prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --shadow-database-url "$SHADOW_DATABASE_URL" --exit-code
       - name: Database constraint tests

@@ -9,11 +9,13 @@ This project's `prisma/schema.prisma` already declares `directUrl = env("DIRECT_
 1. **Database connection strings.** Supabase gives you two poolers for the same database; use both, for different jobs:
    - transaction pooler (port 6543) → `DATABASE_URL`, with `?pgbouncer=true&connection_limit=1` — short-lived connections for serverless function invocations;
    - session pooler (port 5432) → `DIRECT_URL` — migrations and seeding need a session-level connection, which a transaction pooler can't give them.
-2. **Migrate and seed** from your machine against the production database (once, and after every schema change):
+2. **Migrate and seed** from your machine against the production database (once, and after every schema change). Prisma CLI commands read `DIRECT_URL`, not `DATABASE_URL` (see the warning below) — set both to the session pooler URL:
    ```powershell
-   $env:DATABASE_URL="<session pooler url>"; npm run db:deploy; npm run db:seed; Remove-Item Env:DATABASE_URL
+   $env:DATABASE_URL="<session pooler url>"; $env:DIRECT_URL="<session pooler url>"; npm run db:deploy; npm run db:seed; Remove-Item Env:DATABASE_URL; Remove-Item Env:DIRECT_URL
    ```
-   (bash: `DATABASE_URL="<session pooler url>" npm run db:deploy && DATABASE_URL="<session pooler url>" npm run db:seed`). Alternatively set the Vercel build command to `npm run db:deploy && npm run build` so every deploy applies pending migrations first — in that case give the build step `DATABASE_URL` set to the session pooler too, since `prisma migrate deploy` needs the same session-level connection.
+   (bash: `DATABASE_URL="<session pooler url>" DIRECT_URL="<session pooler url>" npm run db:deploy && DATABASE_URL="<session pooler url>" DIRECT_URL="<session pooler url>" npm run db:seed`). Alternatively set the Vercel build command to `npm run db:deploy && npm run build` so every deploy applies pending migrations first — in that case give the build step both `DATABASE_URL` and `DIRECT_URL` set to the session pooler.
+
+   > **`DIRECT_URL` trap.** `migrate deploy`, `migrate dev`, `migrate reset` and `db push` all use `directUrl` from the datasource block, which maps to `DIRECT_URL` — not `DATABASE_URL`. Overriding `DATABASE_URL` alone to point Prisma at a different database (local, test, or a different environment) still leaves the CLI reading whatever `DIRECT_URL` is set to elsewhere (e.g. `.env`'s Supabase value) and running there instead. Always override **both** together.
 3. **Vercel project.** Import the Git repository. Framework preset: Next.js. Build command: `npm run build`. Environment variables (Production and Preview):
    - `DATABASE_URL` — Supabase transaction pooler, port 6543, `?pgbouncer=true&connection_limit=1`
    - `DIRECT_URL` — Supabase session pooler, port 5432

@@ -21,6 +21,9 @@ if (process.env.DATABASE_URL_TEST) {
     throw new Error("DATABASE_URL_TEST must differ from DATABASE_URL — integration tests delete data.");
   }
   process.env.DATABASE_URL = process.env.DATABASE_URL_TEST;
+  // Prisma CLI commands read DIRECT_URL (see prisma/schema.prisma's datasource block); leaving it
+  // pointed at .env's Supabase value here would run migrate/seed against Supabase, not the test DB.
+  process.env.DIRECT_URL = process.env.DATABASE_URL_TEST;
 }
 // Never call a real AI provider from tests.
 delete process.env.AI_API_KEY;

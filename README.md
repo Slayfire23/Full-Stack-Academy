@@ -163,6 +163,8 @@ All variables are documented in [`.env.example`](.env.example).
 | `AI_GENERATION_HOURLY_LIMIT` | no | Generation requests per user per hour (default 20). |
 | `REGISTER_RATE_LIMIT_PER_HOUR` | no | Registrations allowed per IP per hour (default **5**). Anti-abuse, not a usage cap — keep it low in production. Playwright's own `webServer` raises it for the e2e suite only; never raise it anywhere else. |
 
+> **Prisma CLI commands use `DIRECT_URL`, not `DATABASE_URL`.** `migrate deploy`, `migrate dev`, `migrate reset` and `db push` all read `directUrl` from `prisma/schema.prisma`'s datasource block, which maps to `DIRECT_URL`. If you point Prisma at a local or test database — e.g. `DATABASE_URL=$DATABASE_URL_TEST npx prisma migrate dev --create-only` — and only override `DATABASE_URL`, the command still falls through to `.env`'s `DIRECT_URL` and runs against Supabase. Always override **both** together.
+
 ## Running the tests
 
 | Command | Needs | What it runs |

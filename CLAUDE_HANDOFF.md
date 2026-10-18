@@ -14,6 +14,8 @@ Lessons gained structured fields (summary, explanation, real-world example, code
 
 The app's `DATABASE_URL` points at a **Supabase** Postgres database with real data — not a local/throwaway database. Never run `prisma migrate dev`, `prisma migrate reset`, `npm run db:reset` or `npm test` against it. Destructive or reset-style commands (`db:reset`, `db:migrate`, integration tests, `test:db`) must only ever target `DATABASE_URL_TEST`, which should stay pointed at the local Docker Postgres from `docker-compose.yml` — **port 5434, not 5432** (a native PostgreSQL install commonly already owns 5432).
 
+**`DIRECT_URL` trap:** `prisma/schema.prisma`'s datasource block declares `directUrl = env("DIRECT_URL")` for Vercel (see DEPLOYMENT.md). Prisma CLI commands (`migrate deploy`, `migrate dev`, `migrate reset`, `db push`) read `DIRECT_URL`, not `DATABASE_URL`. If you point Prisma at a local or test database by overriding `DATABASE_URL` alone — e.g. `DATABASE_URL=$DATABASE_URL_TEST npx prisma migrate dev --create-only` — the command still falls through to `.env`'s `DIRECT_URL`, which is Supabase. **Always override both together.**
+
 ## First thing to do
 
 ```powershell

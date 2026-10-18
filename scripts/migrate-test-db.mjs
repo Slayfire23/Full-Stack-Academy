@@ -12,6 +12,8 @@ if (!url) {
 const r = spawnSync("npx", ["prisma", "migrate", "deploy"], {
   stdio: "inherit",
   shell: process.platform === "win32",
-  env: { ...process.env, DATABASE_URL: url },
+  // Prisma CLI commands read DIRECT_URL (see prisma/schema.prisma's datasource block), not just
+  // DATABASE_URL — leaving it unset here would fall through to .env's DIRECT_URL and migrate Supabase.
+  env: { ...process.env, DATABASE_URL: url, DIRECT_URL: url },
 });
 process.exit(r.status ?? 1);
