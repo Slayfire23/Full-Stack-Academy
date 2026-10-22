@@ -771,13 +771,18 @@ export async function login(email: string, password: string, ip: string) {
   },
 };
 
-const topics: SeedTopic[] = [
-  httpTopic,
-  restTopic,
-  jsTsTopic,
-  nodeAsyncTopic,
-  authTopic,
-  t("postgres", "PostgreSQL and relational databases", "Tables, keys, constraints, NULL semantics, ACID and reading query plans.", `
+const postgresTopic: SeedTopic = {
+  slug: "postgres",
+  title: "PostgreSQL and relational databases",
+  description: "Tables, keys, constraints, NULL semantics, ACID and reading query plans.",
+  lesson: {
+    slug: "essentials",
+    title: "PostgreSQL and relational databases: essentials",
+    level: "BEGINNER",
+    estimatedMinutes: 15,
+    summary:
+      "A relational database's real job is enforcing invariants — primary keys, foreign keys, NOT NULL and CHECK constraints apply to every writer, not just the one you remembered to validate in application code.",
+    content: `
 Relational databases enforce structure and **invariants**. Push rules into the schema wherever possible: primary keys, foreign keys, UNIQUE, NOT NULL and CHECK constraints are enforced for every writer, including scripts and future services.
 
 - ACID: atomicity, consistency, isolation, durability.
@@ -785,8 +790,142 @@ Relational databases enforce structure and **invariants**. Push rules into the s
 - Money: NUMERIC or integer cents, never floating point.
 - Normalize to store each fact once; denormalize deliberately for read performance or historical snapshots (an order's price at purchase time).
 - \`EXPLAIN ANALYZE\` shows what the planner actually did.
-`),
-  t("prisma", "Prisma ORM", "Schema, migrations, querying relations, transactions and common pitfalls.", `
+`.trim(),
+    explanation: `
+## Tables, keys and relationships
+
+A table is a typed set of rows. The **primary key** uniquely identifies each row; a **foreign key** points at another table's primary key and is how relationships are expressed — an \`orderId\` column on \`order_items\` pointing at \`orders.id\`. PostgreSQL enforces both: you cannot insert an \`order_items\` row whose \`orderId\` does not exist in \`orders\`, and you cannot insert two rows with the same primary key.
+
+## Constraints enforce invariants, not just intentions
+
+Application code that "always validates before inserting" is not a substitute for a database constraint: a second service, a one-off script, a future contributor, or a bug anywhere upstream can all skip that validation, and the invariant only actually holds if the database itself refuses to store a row that violates it.
+
+- **PRIMARY KEY** — unique and not null, one per table, usually the thing foreign keys point at.
+- **UNIQUE** — no two rows share this value (or combination of values), but unlike a primary key a table can have several, and NULLs are allowed to repeat (two rows can both have a NULL in a UNIQUE column).
+- **NOT NULL** — this column must always have a value.
+- **CHECK** — an arbitrary boolean condition every row must satisfy, e.g. \`CHECK (quantity > 0)\`.
+- **FOREIGN KEY** — this column's value must exist as a primary key (or unique value) in the referenced table.
+
+## NULL means "unknown," not "empty" or "zero"
+
+NULL is not a value — it is the *absence* of one, and it propagates through comparisons in ways that surprise people coming from general-purpose programming languages. \`NULL = NULL\` is not true, it is \`NULL\` (unknown) — which is why you write \`WHERE deleted_at IS NULL\`, not \`WHERE deleted_at = NULL\` (the latter matches nothing, ever, silently). \`NOT IN\` is the sharper trap: \`WHERE id NOT IN (SELECT user_id FROM banned_users)\` returns **zero rows** — not "everyone except banned users" — the moment \`banned_users.user_id\` contains even one NULL, because the whole \`IN\` list becomes unknown. Prefer \`NOT EXISTS\` for this kind of "excluding" query; it does not have this problem.
+
+## ACID, briefly
+
+- **Atomicity** — a transaction's statements all commit, or none do.
+- **Consistency** — every committed state satisfies the schema's constraints.
+- **Isolation** — concurrent transactions do not see each other's uncommitted work (how much isolation exactly is a tunable level — see the Database isolation and locking topic).
+- **Durability** — once committed, a crash immediately after cannot lose the write.
+
+## Money, and other precision-sensitive values
+
+Never store money as \`FLOAT\`/\`DOUBLE\` — binary floating point cannot represent most decimal fractions exactly, and the rounding error compounds across enough additions to produce a ledger that does not balance. Use \`NUMERIC(precision, scale)\` (exact decimal arithmetic) or store integer cents/the smallest currency unit.
+
+## Normalization, and denormalizing on purpose
+
+Normalizing means storing each fact once, so an update cannot leave two copies disagreeing — a customer's name lives in \`customers\`, not copied onto every one of their orders. Denormalization (storing a fact more than once) is sometimes the right deliberate trade-off for read performance or for a historical snapshot that must *not* change later — an order row storing the product's price **at the time of purchase**, which should stay fixed even after the product's current price changes.
+
+## Reading EXPLAIN ANALYZE
+
+\`EXPLAIN\` shows the planner's intended plan; \`EXPLAIN ANALYZE\` actually runs the query and reports real timings and row counts alongside it. Read it bottom-up: the innermost nodes run first. A \`Seq Scan\` reads every row in the table — fine for a small table, a red flag on a large one filtered by a selective condition; an \`Index Scan\` or \`Index Only Scan\` uses an index instead. Compare "rows" (the planner's estimate) against "actual rows" — a wildly wrong estimate usually means statistics are stale (\`ANALYZE tablename\`) and the planner may be choosing a bad plan because of it.
+`.trim(),
+    realWorldExample: `
+An inventory system needs products, warehouses and per-warehouse stock that must never go negative:
+
+\`\`\`sql
+CREATE TABLE products (
+  id          bigserial PRIMARY KEY,
+  sku         text NOT NULL UNIQUE,
+  name        text NOT NULL,
+  price_cents integer NOT NULL CHECK (price_cents >= 0)
+);
+
+CREATE TABLE warehouses (
+  id   bigserial PRIMARY KEY,
+  name text NOT NULL
+);
+
+CREATE TABLE stock (
+  product_id   bigint NOT NULL REFERENCES products(id),
+  warehouse_id bigint NOT NULL REFERENCES warehouses(id),
+  quantity     integer NOT NULL CHECK (quantity >= 0),
+  PRIMARY KEY (product_id, warehouse_id)
+);
+\`\`\`
+
+\`quantity >= 0\` means the database itself refuses a write that would take stock negative — no application code, anywhere, can accidentally bypass it. The composite primary key \`(product_id, warehouse_id)\` makes "one stock row per product per warehouse" an invariant too, not just a convention.
+
+**A query the primary key can't help with.** The composite primary key \`(product_id, warehouse_id)\` already indexes \`product_id\` — as its *leading* column. "Which products are low on stock in warehouse 7?" filters on \`warehouse_id\` instead:
+
+\`\`\`sql
+EXPLAIN ANALYZE
+SELECT product_id, quantity FROM stock WHERE warehouse_id = 7 AND quantity < 10;
+\`\`\`
+\`\`\`
+Seq Scan on stock (actual time=0.018..41.223 rows=812 loops=1)
+  Filter: (warehouse_id = 7 AND quantity < 10)
+\`\`\`
+The primary key's index is sorted by \`product_id\` first, so a query that doesn't filter on \`product_id\` has no sorted prefix to jump to, and PostgreSQL falls back to scanning every row — a preview of the **leftmost-prefix rule**, which the joins and indexes topic covers in depth. Adding an index with \`warehouse_id\` as its own leading column fixes exactly this query:
+
+\`\`\`sql
+CREATE INDEX stock_warehouse_id_idx ON stock (warehouse_id);
+\`\`\`
+`.trim(),
+    codeExample: `
+-- Schema-level invariants: enforced for every writer, not just this app's code.
+CREATE TABLE accounts (
+  id             bigserial PRIMARY KEY,
+  owner_user_id  text NOT NULL,
+  balance_cents  bigint NOT NULL CHECK (balance_cents >= 0),
+  updated_at     timestamptz NOT NULL DEFAULT now()
+);
+
+-- NULL semantics: "no deletion date yet" is unknown, not empty — use IS NULL.
+SELECT * FROM accounts WHERE owner_user_id = $1; -- fine, no NULL involved here
+-- A column that CAN be NULL needs IS NULL / IS NOT NULL, never "= NULL":
+-- SELECT * FROM sessions WHERE revoked_at IS NULL;   -- correct: still active
+-- SELECT * FROM sessions WHERE revoked_at = NULL;    -- always zero rows, silently
+
+-- Money as an exact integer type, never FLOAT/DOUBLE. Scoped by owner, not just id — the same
+-- "fold ownership into the mutation itself" habit the Prisma ORM topic covers for updateMany:
+UPDATE accounts
+SET balance_cents = balance_cents - $1, updated_at = now()
+WHERE id = $2 AND owner_user_id = $3 AND balance_cents >= $1; -- CHECK is the second line of defense
+
+CREATE INDEX accounts_owner_user_id_idx ON accounts (owner_user_id);
+
+-- EXPLAIN ANALYZE: did the planner use an index, and did its row estimate match reality?
+EXPLAIN ANALYZE
+SELECT * FROM accounts WHERE owner_user_id = 'user_123';
+-- Index Scan using accounts_owner_user_id_idx on accounts
+--   (actual time=0.028..0.031 rows=1 loops=1)
+-- "rows" close to "actual rows" means the planner's statistics are current and trustworthy.
+`.trim(),
+    codeLanguage: "SQL",
+    commonMistakes: `
+- **\`WHERE column = NULL\`.** This matches nothing, ever — NULL is "unknown," and nothing is known to equal unknown. Use \`IS NULL\` / \`IS NOT NULL\`.
+- **\`NOT IN\` against a column that can contain NULL.** One NULL in the subquery's results makes the entire \`NOT IN\` comparison unknown for every row, silently returning zero matches. Use \`NOT EXISTS\` for "exclude rows matching this" logic instead.
+- **Storing money as FLOAT or DOUBLE.** Binary floating point cannot represent most decimal fractions exactly; the rounding error compounds. Use \`NUMERIC\` or integer cents.
+- **Validating an invariant only in application code.** A constraint the database does not enforce is a suggestion, not a guarantee — the next script, migration, or service to touch that table can violate it.
+- **Treating EXPLAIN's estimated "rows" as ground truth without running ANALYZE.** Stale table statistics (after a large bulk load, for instance) can make the planner choose a bad plan; \`ANALYZE tablename\` refreshes them.
+- **Over-normalizing a value that must not change retroactively.** A snapshot like "the price the customer actually paid" belongs stored on the order row itself — looking it up live from the current product price is wrong the moment the product's price changes later.
+`.trim(),
+  },
+};
+
+const prismaTopic: SeedTopic = {
+  slug: "prisma",
+  title: "Prisma ORM",
+  description: "Schema, migrations, querying relations, transactions and common pitfalls.",
+  prerequisiteSlugs: ["postgres"],
+  lesson: {
+    slug: "essentials",
+    title: "Prisma ORM: essentials",
+    level: "INTERMEDIATE",
+    estimatedMinutes: 18,
+    summary:
+      "Prisma generates a type-safe client from schema.prisma, but the type safety stops at the database boundary — N+1 queries, unscoped updates and a new client per request are all still possible mistakes it won't catch for you.",
+    content: `
 Prisma generates a type-safe client from \`schema.prisma\`.
 
 - \`prisma migrate dev\` creates and applies migrations in development; \`prisma migrate deploy\` applies committed migrations in CI/production without generating new ones.
@@ -794,22 +933,344 @@ Prisma generates a type-safe client from \`schema.prisma\`.
 - \`findUnique\` returns \`null\` when nothing matches; \`update\` and \`delete\` throw (error code P2025).
 - \`$transaction([...])\` runs independent operations atomically; interactive \`$transaction(async (tx) => ...)\` rolls back if the callback throws.
 - In Next.js development, keep a single PrismaClient on \`globalThis\` so hot reloads do not exhaust connections.
-`),
-  t("joins-indexes", "Database joins, indexes, and constraints", "Join types, B-tree indexes, composite index order and constraint trade-offs.", `
+`.trim(),
+    explanation: `
+## schema.prisma and migrations
+
+\`schema.prisma\` is the single source of truth for your tables, generating both the SQL migrations and the TypeScript client. \`prisma migrate dev\` is a **development** command: it compares the schema against the database, generates a new migration file for the difference, and applies it — never run it against a database with real user data, since it can prompt to reset the database when it can't resolve drift. \`prisma migrate deploy\` only **applies already-committed migration files**, generating nothing new; it is the one safe to run in CI and production.
+
+## Querying relations: select, include, and N+1
+
+\`include\` loads a relation alongside the base row, in one additional query (or a JOIN, for some relations) — the fix for the classic **N+1 problem**: querying a list of orders, then looping over them and querying each order's items separately, is 1 + N queries instead of 2. \`select\` instead picks exactly which fields to return, including nested relation fields — \`select\` and \`include\` cannot both be used at the top level of the same query, but \`select\` can nest a relation's own \`select\`/\`include\` inside it when you need both field-trimming and a relation.
+
+## Errors: null vs thrown
+
+\`findUnique\` and \`findFirst\` return \`null\` when nothing matches — an expected, ordinary outcome you check with an \`if\`. \`update\` and \`delete\` instead **throw** (Prisma error code \`P2025\`) when their \`where\` matches no row, because they assume the row exists; code that calls \`update\`/\`delete\` on an id the caller supplied needs to either catch \`P2025\` or use \`updateMany\`/\`deleteMany\`, which match zero rows silently and return a \`count\` instead of throwing — often the better choice precisely because it lets you fold an ownership check into the \`where\` clause without needing a separate catch block.
+
+## Transactions, briefly
+
+\`prisma.$transaction([...])\` (the array form) runs a fixed, pre-built list of independent operations atomically. \`prisma.$transaction(async (tx) => { ... })\` (the interactive form) lets later operations depend on earlier results within the same callback, and rolls back automatically if the callback throws. The Transactions and rollback topic goes deeper into when you need one and how to keep it safe.
+
+## One PrismaClient per process
+
+Creating a \`new PrismaClient()\` per request opens a new connection pool each time; under load (or during Next.js's development hot-reloading, which re-runs module code on every save) this exhausts the database's connection limit. Create one instance and reuse it — in development, cached on \`globalThis\` so a hot reload finds the existing one instead of creating another.
+`.trim(),
+    realWorldExample: `
+A user's "My Orders" page needs each order with its line items — a textbook N+1 opportunity if written carelessly.
+
+**The N+1 version** (one query for orders, then one more *per order*):
+\`\`\`ts
+const orders = await db.order.findMany({ where: { userId } });
+for (const order of orders) {
+  order.items = await db.orderItem.findMany({ where: { orderId: order.id } }); // N extra queries
+}
+\`\`\`
+50 orders means 51 round trips to the database for one page load.
+
+**The fixed version** loads everything in one query with \`include\`, and scopes the whole thing to the signed-in user at the same time:
+\`\`\`ts
+const orders = await db.order.findMany({
+  where: { userId }, // ownership, not just existence
+  include: { items: true },
+  orderBy: { createdAt: "desc" },
+});
+\`\`\`
+Two queries in total, however many orders there are — one for the orders, one batched query for all of their items (\`include\` does not compile this into a SQL JOIN by default) — and \`db.order.findMany\` only ever returns rows that already belong to \`userId\`, so there is no separate "is this mine?" step to forget.
+`.trim(),
+    codeExample: `
+import { NextResponse } from "next/server";
+
+// GET /api/orders — one query for the list and its items, scoped to the caller.
+export async function GET(req: Request) {
+  const userId = await requireUserId(req);
+  const orders = await db.order.findMany({
+    where: { userId },
+    include: { items: true },
+    orderBy: { createdAt: "desc" },
+  });
+  return NextResponse.json(orders);
+}
+
+// DELETE /api/orders/[id] — Next.js 15: params is a Promise.
+export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const userId = await requireUserId(req);
+
+  // deleteMany, not delete: folds the ownership check into the WHERE clause itself, so there is
+  // no separate "does this exist, and is it mine?" read to race against — and it returns a count
+  // (0 or 1) instead of throwing P2025 when the row doesn't exist or belongs to someone else.
+  const { count } = await db.order.deleteMany({ where: { id, userId } });
+  if (count === 0) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  return new NextResponse(null, { status: 204 });
+}
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **A new \`PrismaClient\` per request.** Each instance opens its own connection pool; under load (or Next.js dev hot-reload) this exhausts the database's connection limit. Create one instance and reuse it.
+- **N+1 queries from looping over a list to fetch each row's relation.** Use \`include\` (or a nested \`select\`) to load it in one query instead.
+- **Calling \`update\`/\`delete\` with just \`{ id }\` in \`where\`, trusting a separate check earlier to have confirmed ownership.** That separate check can race with a concurrent request, or simply be missing on some code path. Fold the ownership condition into the same \`where\` (or use \`updateMany\`/\`deleteMany\`) so there is nothing to forget.
+- **Assuming \`update\`/\`delete\` return \`null\` for a missing row, like \`findUnique\` does.** They throw \`P2025\` instead — catch it, or switch to the \`*Many\` form, which returns a count.
+- **Running \`prisma migrate dev\` against a database with real data.** It is a development command that can decide to reset the database to resolve drift it can't express as a migration. Production and CI use \`prisma migrate deploy\`, which only applies already-committed migrations.
+- **Mixing \`select\` and \`include\` at the same level.** Prisma rejects that combination; nest the relation inside \`select\` instead if you also need to trim fields.
+`.trim(),
+  },
+};
+
+const joinsIndexesTopic: SeedTopic = {
+  slug: "joins-indexes",
+  title: "Database joins, indexes, and constraints",
+  description: "Join types, B-tree indexes, composite index order and constraint trade-offs.",
+  prerequisiteSlugs: ["postgres"],
+  lesson: {
+    slug: "essentials",
+    title: "Database joins, indexes, and constraints: essentials",
+    level: "INTERMEDIATE",
+    estimatedMinutes: 18,
+    summary:
+      "An index only helps the queries whose filtering and ordering match its leading columns — and the join type you pick decides whether rows with no match disappear or show up as NULLs.",
+    content: `
 - **INNER JOIN** keeps matching rows only; **LEFT JOIN** keeps every left row and fills missing right columns with NULL.
 - A B-tree index speeds up equality, range and ORDER BY on its leading columns, at the cost of extra writes and storage.
-- Composite index \`(customer_id, created_at)\` serves \`WHERE customer_id = ?\` and \`WHERE customer_id = ? ORDER BY created_at\` well; a filter on a column outside the index cannot use it.
+- Composite index \`("customerId", "createdAt")\` serves \`WHERE "customerId" = ?\` and \`WHERE "customerId" = ? ORDER BY "createdAt"\` well; a filter on a column outside the index cannot use it.
 - Wrapping an indexed column in a function (\`lower(email)\`) needs an **expression index**.
-- Foreign keys choose what happens on delete: CASCADE, RESTRICT or SET NULL — pick deliberately.
-`),
-  t("transactions", "Transactions and rollback", "Atomic multi-step writes, rollback, savepoints and keeping transactions short.", `
+- Foreign keys choose what happens on delete: the default NO ACTION/RESTRICT pairing (refuse), CASCADE (delete too), or SET NULL — pick deliberately.
+`.trim(),
+    explanation: `
+## Join types
+
+- **INNER JOIN** keeps only rows that match on both sides — a customer with zero orders disappears from the result entirely.
+- **LEFT JOIN** keeps every row from the left table, filling the right side's columns with NULL where there is no match — the customer with zero orders still appears, with NULL order columns.
+- **RIGHT JOIN** is the mirror image (keep every right-table row); in practice most people just swap table order and use LEFT JOIN instead.
+- **FULL JOIN** keeps every row from both sides, matched where possible.
+
+Picking INNER where you meant LEFT is one of the most common correctness bugs in reporting queries — "customers with no orders" silently vanishes, and the bug is invisible until someone asks why the count looks low.
+
+## How a B-tree index actually helps
+
+PostgreSQL's default index type, B-tree, keeps values in sorted order, so it can jump straight to a range instead of scanning every row. That makes it useful for **equality** (\`WHERE id = $1\`), **range** (\`WHERE created_at > $1\`) and **ORDER BY** on its columns — but it does not help \`!=\`, and it generally does not help \`LIKE '%term%'\` (a leading wildcard), since there is no sorted prefix to jump to.
+
+Every index also has a cost: it must be updated on every INSERT/UPDATE/DELETE that touches its columns, and it takes disk space. An index that no query's WHERE/ORDER BY ever uses is pure overhead.
+
+## Composite indexes and the leftmost-prefix rule
+
+A composite index \`("customerId", "createdAt")\` is really one sorted structure, sorted first by \`"customerId"\`, then by \`"createdAt"\` within each \`"customerId"\`. It serves:
+- \`WHERE "customerId" = ?\` — uses the first column alone.
+- \`WHERE "customerId" = ? ORDER BY "createdAt"\` — uses both, in order: it can jump to the right \`"customerId"\` and the rows are already sorted by \`"createdAt"\` from there.
+
+It does **not** help \`WHERE "createdAt" > ?\` alone — skipping the leading column breaks the "sorted prefix" the index relies on, the same way you cannot usefully binary-search a phone book by first name when it is sorted by last name. This is the leftmost-prefix rule: a composite index helps a query only if that query filters (or sorts) on a prefix of the index's column list, left to right.
+
+## Expression indexes
+
+Wrapping an indexed column in a function — \`WHERE lower(email) = lower($1)\`, to do a case-insensitive lookup — defeats a plain index on \`email\`, because the index is sorted by the *raw* column, not by \`lower(email)\`. An **expression index**, \`CREATE INDEX ON users (lower(email))\`, indexes the function's output instead, and a query using that exact expression can use it again.
+
+## Constraints: picking ON DELETE deliberately
+
+A foreign key's \`ON DELETE\` behavior decides what happens to dependent rows when the referenced row is deleted:
+- **NO ACTION** (the actual default if you write nothing) — refuse the delete while dependent rows exist, checked at the end of the statement (or the whole transaction, if the constraint is declared \`DEFERRABLE INITIALLY DEFERRED\`). Undeferred, this behaves identically to RESTRICT.
+- **RESTRICT** — the same refusal, checked immediately, and it cannot be deferred even if you wanted it to be.
+- **CASCADE** — delete the dependent rows too.
+- **SET NULL** — keep the dependent rows, but null out the foreign key column (the column must allow NULL).
+
+Each is a real product decision, not a default to accept unthinkingly: CASCADE on \`orders\` referencing \`users\` would silently destroy a customer's order history the moment an admin deletes their account.
+`.trim(),
+    realWorldExample: `
+A "my orders" page joins \`orders\` to \`customers\`, filtered to one customer and sorted newest-first. Without the right index:
+
+\`\`\`sql
+EXPLAIN ANALYZE
+SELECT * FROM orders WHERE "customerId" = 42 ORDER BY "createdAt" DESC LIMIT 20;
+\`\`\`
+\`\`\`
+Limit (actual time=812.447..812.451 rows=20 loops=1)
+  -> Sort (actual time=812.440..812.449 rows=20 loops=1)
+       Sort Key: "createdAt" DESC
+       -> Seq Scan on orders (actual time=0.015..801.223 rows=14022 loops=1)
+            Filter: ("customerId" = 42)
+\`\`\`
+At 20 million rows, that sequential scan dominates the response time. Adding the composite index that matches exactly this query's filter-then-sort shape:
+
+\`\`\`sql
+CREATE INDEX orders_customerId_createdAt_idx ON orders ("customerId", "createdAt" DESC);
+\`\`\`
+
+turns the plan into an \`Index Scan\` that jumps straight to \`"customerId" = 42\`'s rows, already sorted — milliseconds instead of hundreds of them, and the improvement gets *larger*, not smaller, as the table grows.
+
+**A join that changes the answer, not just the speed.** "List every customer with their order count, including customers who haven't ordered yet" needs LEFT JOIN, not INNER JOIN:
+\`\`\`sql
+SELECT c.id, c.name, count(o.id) AS "orderCount"
+FROM customers c
+LEFT JOIN orders o ON o."customerId" = c.id
+GROUP BY c.id, c.name;
+\`\`\`
+Switching this to INNER JOIN would make every zero-order customer vanish from the report instead of showing \`"orderCount" = 0\`.
+`.trim(),
+    codeExample: `
+-- Composite index matching a real per-user, time-ordered query (leftmost-prefix rule):
+CREATE INDEX orders_userId_createdAt_idx ON orders ("userId", "createdAt" DESC);
+-- Serves: WHERE "userId" = $1                           (leading column alone)
+-- Serves: WHERE "userId" = $1 ORDER BY "createdAt" DESC  (both columns, in order)
+-- Does NOT serve: WHERE "createdAt" > $1 alone — skips the leading column.
+
+-- Case-insensitive lookup needs an expression index, not a plain one:
+CREATE INDEX users_email_lower_idx ON users (lower(email));
+SELECT * FROM users WHERE lower(email) = lower($1); -- now uses the expression index
+
+-- INNER vs LEFT changes the answer, not just the plan:
+SELECT c.id, c.name, count(o.id) AS "orderCount"   -- LEFT: zero-order customers appear, count 0
+FROM customers c
+LEFT JOIN orders o ON o."customerId" = c.id
+GROUP BY c.id, c.name;
+
+-- Foreign key ON DELETE is a product decision, not a default to accept blindly:
+ALTER TABLE orders
+  ADD CONSTRAINT orders_customerId_fkey
+  FOREIGN KEY ("customerId") REFERENCES customers(id)
+  ON DELETE RESTRICT; -- refuse to delete a customer who still has orders (same as the NO ACTION default here)
+`.trim(),
+    codeLanguage: "SQL",
+    commonMistakes: `
+- **Assuming a composite index helps any query that mentions its columns.** The leftmost-prefix rule means \`(a, b)\` helps \`WHERE a = ?\` and \`WHERE a = ? AND b = ?\`, but not \`WHERE b = ?\` alone — the leading column must be in the filter for the index to be usable at all.
+- **Wrapping an indexed column in a function and expecting the plain index to still apply.** \`lower(email)\`, \`date(created_at)\` and similar need a matching expression index.
+- **Adding an index for every column that ever appears in a WHERE clause.** Each index slows down every write that touches it and takes storage; index the queries that actually run often or run slow, not every theoretical filter.
+- **Using INNER JOIN where the question is "...including ones with none."** It silently drops the non-matching side instead of raising an error, so the bug shows up as "the count looks low," not a crash.
+- **Not indexing foreign key columns.** PostgreSQL does not automatically index the referencing column of a foreign key (only the referenced primary key on the other side) — joins and ON DELETE CASCADE checks on an un-indexed FK column scan the whole table.
+- **Picking CASCADE for "convenience" without thinking through what it destroys.** A CASCADE from \`users\` to \`orders\` means deleting a user silently deletes their entire order history; sticking with the NO ACTION/RESTRICT default, or SET NULL, is often the safer choice.
+`.trim(),
+  },
+};
+
+const transactionsTopic: SeedTopic = {
+  slug: "transactions",
+  title: "Transactions and rollback",
+  description: "Atomic multi-step writes, rollback, savepoints and keeping transactions short.",
+  prerequisiteSlugs: ["postgres", "prisma"],
+  lesson: {
+    slug: "essentials",
+    title: "Transactions and rollback: essentials",
+    level: "INTERMEDIATE",
+    estimatedMinutes: 20,
+    summary:
+      "A transaction guarantees several statements commit together or not at all — it does not, by itself, make a check-then-act sequence race-safe; that still needs an atomic condition or a lock.",
+    content: `
 A transaction groups statements so they all commit or none do.
 
 - Use one whenever several writes must stay consistent (debit + credit, order + stock movement).
 - After an error inside a PostgreSQL transaction block, every further statement fails until you ROLLBACK (or roll back to a savepoint).
 - Keep transactions short: no network calls to payment providers or email services inside them — they hold locks and connections while waiting.
 - For "write to DB and then notify another system", use the **transactional outbox**: insert an event row in the same transaction and publish it afterwards.
-`),
+`.trim(),
+    explanation: `
+## What a transaction guarantees
+
+A transaction groups statements so that either all of them commit, or none do — the "A" in ACID. Use one whenever several writes must stay consistent with each other: debiting one account and crediting another, or creating an order alongside the stock movement that reserves it. Without a transaction, a crash or an error between the two writes leaves the database in a state that should have been impossible.
+
+## Aborted transactions: nothing works until ROLLBACK
+
+In PostgreSQL, once *any* statement inside a transaction block fails, the whole transaction enters an **aborted** state: every further statement — even an unrelated \`SELECT\` — fails with "current transaction is aborted, commands ignored until end of transaction block," until you issue \`ROLLBACK\`. A \`SAVEPOINT\` creates a point you can roll back to without abandoning the whole transaction, useful when one sub-step is allowed to fail without discarding everything before it.
+
+## Keep transactions short
+
+A transaction holds locks and a database connection for its entire duration. Never make a network call — a payment provider, an email send, any external API — from inside one: a slow or hanging upstream call now holds those locks open for however long it takes to time out, which can stall or deadlock every other transaction waiting on the same rows.
+
+## The transactional outbox, for side effects you can't put in the transaction
+
+"Write to the database, then notify another system" has an inherent gap: if the write commits and the notification fails (or vice versa), the two are now out of sync. The **transactional outbox** pattern closes it: insert an event row in the *same* transaction as the write, then have a separate process read unpublished rows and send them, retrying until it marks them sent. The notification can now only be "sent for a write that really committed" or "not yet sent" — never "sent for a write that got rolled back."
+
+## Prisma's two forms
+
+\`prisma.$transaction([...])\` (the array form) takes a fixed list of already-built operations and runs them atomically — useful when there is no decision to make between them. \`prisma.$transaction(async (tx) => { ... })\` (the interactive form) runs a callback that can read a result and use it to decide the next write, and rolls back automatically the moment the callback throws — there is no separate commit/rollback call to remember. It also **times out after 5 seconds by default** (configurable via a \`timeout\` option): long enough for database work, not for a network call it should never contain anyway.
+
+Catching the thrown error *inside* the callback doesn't behave the same way every time — it depends on what actually failed. If it was your own business-logic throw (like \`OutOfStockError\` below) and no SQL statement before it had failed, catching it there and returning normally does cancel the rollback: Prisma commits whatever writes already ran in the callback, which is rarely what you want. But if the error came from a failed *SQL statement* — a constraint violation, for instance — PostgreSQL has already put the transaction into its aborted state (see above): every later statement, including the implicit commit, fails too, so catching it inside the callback doesn't rescue anything either. Either way, the safe habit is the same: let the callback's error propagate, and handle it in the \`try\`/\`catch\` around the \`$transaction\` call itself, not inside the callback.
+
+## A transaction is not, by itself, a fix for a race condition
+
+Wrapping a "read the current value, decide in application code, then write" sequence in a transaction does not make it safe under concurrency on its own. PostgreSQL's default isolation level, READ COMMITTED, lets another committed transaction's write land in the gap between your read and your write — two concurrent "reserve the last unit of stock" transactions can each read \`quantity: 1\`, each decide "that's enough," and both commit a decrement, taking stock negative. The fix is to make the *write itself* enforce the condition — \`UPDATE stock SET quantity = quantity - 1 WHERE id = $1 AND quantity >= 1\` and checking the affected row count — or to take a row lock with \`SELECT ... FOR UPDATE\` first. The Concurrency and race conditions topic covers this check-then-act failure mode in depth, and Database isolation and locking covers the isolation levels and locking primitives behind it.
+`.trim(),
+    realWorldExample: `
+Placing an order must create the order and decrement stock together, and must not oversell when two customers race for the last unit.
+
+**Unsafe:** reading stock, deciding in application code, then writing — a classic check-then-act race:
+\`\`\`ts
+const stock = await db.stock.findUnique({ where: { productId } });
+if (stock.quantity < quantity) throw new Error("Out of stock");
+// Another request can run this exact sequence in the gap right here.
+await db.stock.update({ where: { productId }, data: { quantity: stock.quantity - quantity } });
+\`\`\`
+Two requests can both pass the \`if\`, both read the same \`quantity\`, and both commit a decrement — stock goes negative even though every individual check looked correct.
+
+**Safe:** one interactive transaction whose UPDATE enforces the invariant in its own WHERE clause, so there is no separate decision step to race against:
+\`\`\`ts
+const order = await db.$transaction(async (tx) => {
+  const reserved = await tx.stock.updateMany({
+    where: { productId, quantity: { gte: quantity } }, // the condition IS the write
+    data: { quantity: { decrement: quantity } },
+  });
+  if (reserved.count === 0) throw new Error("Out of stock"); // rolls the transaction back
+  return tx.order.create({ data: { userId, productId, quantity } });
+});
+\`\`\`
+If the \`WHERE\` clause doesn't match (not enough stock left), \`updateMany\` updates zero rows, the thrown error rolls back the whole transaction, and no order is created for stock that was never actually reserved.
+`.trim(),
+    codeExample: `
+import { NextResponse } from "next/server";
+import { z } from "zod";
+
+const placeOrderSchema = z.object({
+  productId: z.string().min(1),
+  // Positive, with a cap: a negative quantity would turn "decrement: quantity" into an
+  // increment, manufacturing stock instead of reserving it, and an absurdly large one would
+  // let a single request drain the whole warehouse.
+  quantity: z.number().int().positive().max(100),
+});
+
+class OutOfStockError extends Error {}
+
+// POST /api/orders — reserve stock and create the order atomically; the WHERE clause on the
+// stock update, not a prior read, is what actually prevents overselling under concurrency.
+export async function POST(req: Request) {
+  const userId = await requireUserId(req);
+  const parsed = placeOrderSchema.safeParse(await req.json());
+  if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+  const { productId, quantity } = parsed.data;
+
+  try {
+    const order = await db.$transaction(async (tx) => {
+      const reserved = await tx.stock.updateMany({
+        where: { productId, quantity: { gte: quantity } },
+        data: { quantity: { decrement: quantity } },
+      });
+      if (reserved.count === 0) throw new OutOfStockError();
+      return tx.order.create({ data: { userId, productId, quantity } }); // scoped to the caller
+    });
+    return NextResponse.json(order, { status: 201 });
+  } catch (err) {
+    if (err instanceof OutOfStockError) return NextResponse.json({ error: "Out of stock" }, { status: 409 });
+    throw err; // never swallowed: a real failure must still surface as one
+  }
+}
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Calling an external service — payment, email, any network call — from inside a transaction.** It holds locks and a connection for however long that call takes, including a hang or timeout, blocking every other transaction waiting on the same rows. Commit first, then act, or use a transactional outbox.
+- **Wrapping a check-then-act read-decide-write sequence in a transaction and assuming that alone makes it race-safe.** It doesn't — READ COMMITTED still lets another transaction's write land between your read and your write. Make the write's own WHERE clause enforce the condition, or take a row lock first.
+- **Catching an error inside Prisma's interactive \`$transaction(async (tx) => ...)\` callback and returning normally.** If it was your own thrown business-logic error, this commits whatever writes already ran instead of rolling them back. If it came from a failed SQL statement, PostgreSQL has already aborted the transaction — every later statement, including the commit, still fails, so catching it there doesn't rescue anything either. Let it propagate and handle it outside the callback.
+- **Not knowing that one failed statement aborts the whole transaction.** Every later statement — even an unrelated read — fails until \`ROLLBACK\`, or until you roll back to a \`SAVEPOINT\` taken before the failure.
+- **Keeping a transaction open while waiting on something unrelated** (user input, a slow computation). Long-held locks increase the odds of blocking, or deadlocking, another transaction — and Prisma's interactive \`$transaction\` only tolerates this for 5 seconds by default before timing out on its own.
+- **Reaching for the sequential \`$transaction([...])\` array form when a later step depends on an earlier result.** It runs a fixed list of pre-built operations — it cannot express "decide the next query from this query's result." Use the interactive callback form instead.
+`.trim(),
+  },
+};
+
+const topics: SeedTopic[] = [
+  httpTopic,
+  restTopic,
+  jsTsTopic,
+  nodeAsyncTopic,
+  authTopic,
+  postgresTopic,
+  prismaTopic,
+  joinsIndexesTopic,
+  transactionsTopic,
   t("pagination", "Pagination, filtering, and sorting", "Offset vs cursor pagination, stable ordering and safe query parameters.", `
 - **Offset** (\`LIMIT 20 OFFSET 400\`) is simple and supports page numbers, but deep pages get slower and concurrent inserts shift rows (duplicates or skipped items).
 - **Cursor/keyset** (\`WHERE (created_at, id) < ($1, $2) ORDER BY created_at DESC, id DESC LIMIT 20\`) stays fast at any depth and is stable under inserts.

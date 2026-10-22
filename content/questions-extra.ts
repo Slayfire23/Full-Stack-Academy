@@ -1,4 +1,4 @@
-import { D, mc, ms, sa, sc, type SeedQuestion } from "./helpers";
+import { D, fc, mc, ms, sa, sc, type SeedQuestion } from "./helpers";
 
 const { B, I, A } = D;
 
@@ -14,6 +14,11 @@ export const questionsExtra: SeedQuestion[] = [
     ["304 Not Modified, with no body", "200 OK, with the full body again", "412 Precondition Failed", "204 No Content"], 0,
     "304 Not Modified tells the client its cached copy is still valid, so it can keep using it — saving the bandwidth and time of sending the body again. 412 is for conditional *writes* (If-Match) that fail; it does not apply to a matching If-None-Match on a read.",
     { tags: ["caching", "headers"] }),
+
+  fc("prisma", "prisma-008", I, "What does `db.order.deleteMany({ where: { id, userId } })` give you over `db.order.delete({ where: { id } })` guarded by an earlier ownership check?",
+    "The ownership condition is part of the same atomic statement as the mutation, so there is nothing to forget on any code path, and no gap for ownership to change between a check and the write. It also means \"not found\" and \"not yours\" both collapse to the same `count: 0`, which becomes one 404 without ever needing to tell them apart.",
+    "A separate check-then-delete can be skipped by a code path that forgets it, or raced by something that changes ownership in between the check and the delete. Folding the condition into the WHERE clause removes both risks. Prisma 5+ also lets delete/update accept extra filters alongside a unique field, so `delete({ where: { id, userId } })` is valid directly too — that form still throws P2025, not a count, when nothing matches.",
+    { tags: ["ownership", "race-conditions"] }),
 
   mc("node-async", "node-007", A, "A handler runs `await Promise.all(rows.map((r) => saveRow(r)))` for 10,000 rows, where each saveRow performs a database query. What is the likely problem?",
     ["All 10,000 queries start at once, exhausting the connection pool or overwhelming the database; process them with a concurrency limit or in batches", "Promise.all runs them one at a time, so it is slow", "Promise.all silently ignores rejected promises", "Node.js limits Promise.all to 1,000 promises"], 0,

@@ -6,7 +6,24 @@ import { spawnSync } from "node:child_process";
 import { loadEnv } from "./env.mjs";
 
 loadEnv();
-const sql = readFileSync("tests/db/constraints.sql");
+// constraints.sql inserts fixtures with fixed ids ('u1', 't1', ...) inside one rolled-back
+// transaction, which only works against an empty database — leftover rows (e.g. from a test
+// run that crashed before vitest's afterAll cleanup ran) collide with those ids instead of
+// failing cleanly. Guard for that first, read-only, before the real test transaction begins.
+const guard = `
+DO $$
+DECLARE r record; total bigint := 0; cnt bigint;
+BEGIN
+  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> '_prisma_migrations' LOOP
+    EXECUTE format('SELECT count(*) FROM %I', r.tablename) INTO cnt;
+    total := total + cnt;
+  END LOOP;
+  IF total > 0 THEN
+    RAISE EXCEPTION 'test DB not empty (% row(s) across public tables) — run npm test once (it resets the DB when it finishes) or npm run db:test:migrate after dropping the schema, then re-run npm run test:db', total;
+  END IF;
+END $$;
+`;
+const sql = guard + readFileSync("tests/db/constraints.sql", "utf8");
 // psql's URI parser rejects Prisma-only query params (e.g. ?schema=public) with
 // "invalid URI query parameter", so they're stripped before being passed to a real psql.
 const localUrl = (process.env.DATABASE_URL_TEST ?? "").replace(/\?.*$/, "");
