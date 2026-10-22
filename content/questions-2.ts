@@ -229,6 +229,11 @@ const rateLimiting: SeedQuestion[] = [
     ["200 — 100 at the end of one window and 100 at the start of the next", "100", "101", "50"], 0,
     "Counters reset at the window boundary, so a burst at 12:00:59 and another at 12:01:00 both pass. This boundary burst is the main weakness of fixed windows; sliding windows and token buckets avoid it.",
     { tags: ["algorithms"] }),
+  fc("rate-limiting", "rl-008", I, "A limiter does `INCR` on a key, and only if the result is 1, calls `EXPIRE` on it 60 seconds later in a second command. What's specifically wrong with this, and what isn't?",
+    "The two calls are separate round trips, not one atomic operation, so if the process or connection dies between the INCR and the EXPIRE, the key is left with no TTL at all and counts up forever. Another request's INCR landing in that same gap is not the problem — INCR is itself atomic, so exactly one caller ever sees count === 1 and is responsible for the EXPIRE.",
+    "The fix makes the whole check-and-set-expiry sequence atomic in a single Redis command or script: a Lua script run with EVAL that does both, or SET key 0 NX EX 60 followed by INCR — INCR on an existing key leaves its TTL untouched, so this ordering never needs a second EXPIRE call at all.",
+    { tags: ["redis", "atomicity", "race-conditions"] }),
+
   sc("rate-limiting", "rl-007", A, "Design rate limiting for a public API with free and paid tiers, running on 10 stateless instances behind a load balancer.",
     "Per-API-key token buckets stored in Redis with atomic operations, tier-specific limits, 429 + Retry-After, a fail-open/closed decision, and monitoring.",
     "Limits are keyed by API key, with tier configuration (for example free: 60 per minute, paid: 1,000 per minute with bursts) loaded from the database and cached. Because there are 10 instances, counters live in Redis; a token bucket or sliding-window counter is updated atomically with a Lua script or MULTI so concurrent requests cannot race. Responses include 429 with Retry-After and headers showing remaining quota. Expensive endpoints get separate, lower limits. If Redis is unavailable I would fail open with a conservative per-instance in-memory limit so an outage of the limiter does not take down the API, and alert on it. Metrics on throttled requests per key help spot abuse and customers who need a higher tier.",

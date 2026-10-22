@@ -1261,6 +1261,587 @@ export async function POST(req: Request) {
   },
 };
 
+const paginationTopic: SeedTopic = {
+  slug: "pagination",
+  title: "Pagination, filtering, and sorting",
+  description: "Offset vs cursor pagination, stable ordering and safe query parameters.",
+  prerequisiteSlugs: ["rest", "joins-indexes"],
+  lesson: {
+    slug: "essentials",
+    title: "Pagination, filtering, and sorting: essentials",
+    level: "INTERMEDIATE",
+    estimatedMinutes: 18,
+    summary:
+      "Offset pagination re-walks and discards rows on every deep page; cursor pagination resumes from an index position instead — and both still need a unique tiebreaker, or ties make the order, and the pages, nondeterministic.",
+    content: `
+- **Offset** (\`LIMIT 20 OFFSET 400\`) is simple and supports page numbers, but deep pages get slower and concurrent inserts shift rows (duplicates or skipped items).
+- **Cursor/keyset** (\`WHERE ("createdAt", id) < ($1, $2) ORDER BY "createdAt" DESC, id DESC LIMIT 20\`) stays fast at any depth and is stable under inserts.
+- Always sort by a unique tiebreaker (usually id) so order is deterministic.
+- Whitelist sortable/filterable fields and cap the page size.
+`.trim(),
+    explanation: `
+## Offset pagination, and why deep pages get slow
+
+\`LIMIT 20 OFFSET 400\` is simple to implement and lets a UI jump straight to "page 21" — but PostgreSQL still has to walk past and discard the first 400 matching rows before it can return the next 20. On a small table this is free; on a large one, \`OFFSET 400000\` means stepping past 400,000 rows every single time that page is requested, and the cost keeps growing the deeper a user pages.
+
+## Cursor (keyset) pagination
+
+Cursor pagination carries forward the sort key of the last row the client saw, and asks for rows strictly after it:
+\`\`\`sql
+WHERE ("createdAt", id) < ($1, $2)
+ORDER BY "createdAt" DESC, id DESC
+LIMIT 20;
+\`\`\`
+With a matching index on \`("createdAt", id)\`, this is an index scan that jumps straight to the right position — page 1 and page 5,000 cost the same, because there is no "walk past N rows" step at all. The trade-off is real: a cursor can only move forward or backward from where it is, not jump to an arbitrary page number.
+
+## The tiebreaker: why ORDER BY needs more than one column
+
+Rows are not stored in any guaranteed order; \`ORDER BY "createdAt"\` alone leaves ties — two rows with an identical timestamp — in an order PostgreSQL does not promise to keep stable between queries. Appending a unique column, usually \`id\`, as a second sort key (\`ORDER BY "createdAt" DESC, id DESC\`) makes the order total and deterministic — both offset and cursor pagination need this for the same reason: without it, a row can silently repeat on one page and vanish from another just because two timestamps tied.
+
+## Keeping pages stable under concurrent writes
+
+Offset pagination has a second problem cursor pagination doesn't: rows inserted or deleted between two page requests shift every row after them. A new row inserted at the top before the user loads page 2 pushes page 1's last row into page 2's results — the user sees it twice. A row deleted has the opposite effect: one row is silently never shown. Cursor pagination is immune to this — "everything after this exact key" doesn't shift just because something was inserted or deleted elsewhere in the list.
+
+## Validating and whitelisting query parameters
+
+A sort or filter field taken directly from the query string is a double risk: a field name an attacker controls is an injection vector the moment it's concatenated rather than parameterized, and an unindexed sort column an attacker picks turns an ordinary request into an expensive one. Accept only a fixed whitelist of sort fields (each mapped to a known column and a supporting index, never the raw string), validate filter values against a schema, and cap the page size server-side — a client-supplied \`limit=50000\` should be clamped, not honored.
+
+## The cursor itself: opaque by convention, not a security boundary
+
+Base64 (or any similar encoding) is **encoding, not protection** — a client can decode it, read the last row's sort key and id in plain text, change them, and re-encode a cursor of its own choosing. Treating the cursor as opaque (the client echoes it back unchanged rather than constructing one) is still worth doing, but for a different reason: it keeps the internal format free to change later, not because it stops tampering. Authorization never comes from the cursor — it comes from the \`userId\` condition in the query's own \`WHERE\` clause, which applies identically no matter what a forged cursor claims, so a client that can forge any cursor value still can't see anyone else's rows. If tampering with a cursor's *contents* would matter for some other reason, sign it — an HMAC over the encoded value, verified before it's ever decoded — rather than relying on encoding alone.
+`.trim(),
+    realWorldExample: `
+A customer's "my orders" page used \`GET /api/orders?page=21\` → \`LIMIT 20 OFFSET 400\`. A payment webhook inserted three new orders for that same customer between the customer loading page 1 and page 21 — webhooks can land at any time. Page 21 now starts three rows earlier than it should, and three orders the customer already saw on an earlier page show up again.
+
+Switching to a cursor fixes the shifting-page problem, and scoping it by \`"userId"\` means it can never return another customer's orders either:
+\`\`\`sql
+SELECT id, total, "createdAt"
+FROM orders
+WHERE "userId" = $1 AND ("createdAt", id) < ($2, $3)
+ORDER BY "createdAt" DESC, id DESC
+LIMIT 20;
+\`\`\`
+This needs a composite index with \`"userId"\` leading — the leftmost-prefix rule from the joins and indexes topic:
+\`\`\`sql
+CREATE INDEX orders_userId_createdAt_id_idx ON orders ("userId", "createdAt" DESC, id DESC);
+\`\`\`
+Without it, PostgreSQL has to scan every order in the table and filter by \`"userId"\` before it can even start applying the cursor condition.
+`.trim(),
+    codeExample: `
+import { NextResponse } from "next/server";
+import { z } from "zod";
+
+const listOrdersSchema = z.object({
+  cursor: z.string().optional(), // opaque by convention — the client echoes it back, never builds one
+  limit: z.coerce.number().int().positive().max(50).default(20), // never trust a client-supplied limit uncapped
+});
+
+// Decoding is reversible (it's base64, not encryption), so a client can hand back anything —
+// validate the decoded shape before it ever reaches Prisma, or a malformed cursor becomes an
+// Invalid Date silently passed into the query instead of a clean 400.
+const cursorSchema = z.object({ createdAt: z.string().datetime(), id: z.string().min(1) });
+
+function decodeCursor(cursor: string) {
+  const [createdAt, id] = Buffer.from(cursor, "base64url").toString("utf8").split("|");
+  const parsed = cursorSchema.safeParse({ createdAt, id });
+  return parsed.success ? { createdAt: new Date(parsed.data.createdAt), id: parsed.data.id } : null;
+}
+function encodeCursor(createdAt: Date, id: string) {
+  return Buffer.from(\`\${createdAt.toISOString()}|\${id}\`).toString("base64url");
+}
+
+// GET /api/orders?cursor=...&limit=20 — cursor-paginated, scoped to the caller.
+export async function GET(req: Request) {
+  const userId = await requireUserId(req);
+  const { searchParams } = new URL(req.url);
+  const parsed = listOrdersSchema.safeParse({
+    cursor: searchParams.get("cursor") ?? undefined,
+    limit: searchParams.get("limit") ?? undefined,
+  });
+  if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+  const { cursor, limit } = parsed.data;
+  const after = cursor ? decodeCursor(cursor) : null;
+  if (cursor && !after) return NextResponse.json({ error: "Invalid cursor" }, { status: 400 });
+
+  const orders = await db.order.findMany({
+    where: {
+      userId, // ownership folded into the query, not checked afterwards
+      ...(after
+        ? { OR: [{ createdAt: { lt: after.createdAt } }, { createdAt: after.createdAt, id: { lt: after.id } }] }
+        : {}),
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: limit + 1, // one extra row, only to learn whether another page exists
+  });
+
+  const hasMore = orders.length > limit;
+  const items = orders.slice(0, limit);
+  const last = items.at(-1);
+  return NextResponse.json({ items, nextCursor: hasMore && last ? encodeCursor(last.createdAt, last.id) : null });
+}
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Assuming offset pagination is "fine" because it's simple** — until page depth or write concurrency makes it slow, or outright wrong, with rows repeating or vanishing as data shifts underneath an \`OFFSET\`.
+- **\`ORDER BY\` with no unique tiebreaker.** Ties leave row order — and therefore page contents — nondeterministic across requests.
+- **Trusting a client-supplied \`limit\` without capping it.** An unbounded value turns one request into "return the whole table."
+- **Letting a client pick the sort column from an unvalidated string.** An unindexed choice makes an ordinary request expensive, and interpolating it directly into raw SQL is an injection path.
+- **Treating a cursor's opacity as a security control.** Base64 (or similar) is encoding, not protection — a client can decode and forge one. That's fine as long as the query's own ownership condition (e.g. \`userId = $1\`) is unconditional and never depends on anything the cursor claims; if cursor tampering would matter on its own, sign it (HMAC) instead of just encoding it.
+- **Passing a decoded cursor straight into a query without validating its shape.** A malformed or tampered cursor can decode into an Invalid Date or a garbage id — validate it and return 400, rather than letting it reach the database as a confusing runtime error.
+- **Forgetting to fold ownership into the paginated query's own \`WHERE\` clause.** Checking it once, somewhere earlier, risks a later page silently returning rows that were never the caller's.
+`.trim(),
+  },
+};
+
+const cachingTopic: SeedTopic = {
+  slug: "caching",
+  title: "Caching and Redis concepts",
+  description: "Cache-aside, TTLs, invalidation, stampedes and Redis data structures.",
+  prerequisiteSlugs: ["http"],
+  lesson: {
+    slug: "essentials",
+    title: "Caching and Redis concepts: essentials",
+    level: "INTERMEDIATE",
+    estimatedMinutes: 18,
+    summary:
+      "Cache-aside buys read speed by risking staleness — every value needs both a TTL (the safety net) and an explicit invalidation path (the fast path), and a hot key's expiry can turn into a database-collapsing stampede if nothing coalesces the requests that miss at the same moment.",
+    content: `
+- **Cache-aside**: read from cache; on miss, read the database and populate the cache with a TTL. On writes, update the database and delete (or update) the cache entry.
+- Every cached value needs an expiry and an invalidation story; stale data is the main cost of caching.
+- **Stampede**: when a hot key expires, many requests hit the database at once. Mitigate with request coalescing/locks, early refresh and jittered TTLs.
+- Cache keys must include everything that changes the result — especially the user id for per-user data.
+- Redis offers strings, hashes, lists, sets and sorted sets (great for leaderboards and rate limiting).
+`.trim(),
+    explanation: `
+## Cache-aside: the default pattern
+
+Cache-aside (lazy loading) puts the application in charge of the cache, one key at a time: on a read, check the cache first; on a miss, read the database, write the result into the cache with a TTL, and return it. On a write, update the database, then remove (or update) the cached entry so the next read repopulates it. Redis never talks to the database directly in this pattern — the app always mediates.
+
+## TTL is the safety net, invalidation is the fast path
+
+Every cached value should carry a TTL even when you also invalidate explicitly on writes: invalidation can be missed — a write path you forgot about, a bug, a failed delete that never got retried — and a TTL bounds how long a miss like that can serve wrong data, instead of forever. Pick the TTL from how stale the data may acceptably be: seconds for a price, much longer for configuration that rarely changes.
+
+## A race invalidation alone can't close
+
+Even with invalidation wired up correctly on every write path, one race slips through it: a reader that already missed the cache and read the *old* value from the database — but hasn't written it into the cache yet — can have that write land *after* a concurrent writer's \`DEL\`, repopulating the cache with the exact stale value the writer just tried to clear. Nothing in cache-aside itself closes this gap; it's precisely why the TTL from the previous section still matters even when every invalidation path is correct — the value this race reintroduces still expires on its own, instead of lingering indefinitely.
+
+## Cache stampedes
+
+Cache-aside has a real failure mode of its own: when a hot key expires (or the whole cache restarts empty), every concurrent request misses at the same moment, and all of them hit the database to rebuild the same value — a stampede that can look just like an outage, because a database sized for cache-hit traffic was never meant to serve that volume of reads at once. Mitigate it with request coalescing (a short lock, or an in-process promise cache, so only one request per key rebuilds it while others wait for that result), a proactive refresh before the TTL actually expires, and jittered TTLs so many keys don't expire in the same instant.
+
+## Cache keys must encode everything that changes the result
+
+A cache key has to include every input that affects what gets returned — most importantly the user id for anything personal. A key like \`"me"\` for a \`GET /api/me\` response is wrong the moment a second user's request hits it: whoever populated the key first is served to everyone else until it expires, which is a data leak, not just a performance bug. The safe shape folds every distinguishing input into the key itself, e.g. \`user:\${userId}:profile\`.
+
+## Redis data structures, briefly
+
+Redis is not just a key-value string store: sorted sets (\`ZADD\`/\`ZRANGE\`) keep members ordered by score, the natural fit for a leaderboard; plain sets (\`SADD\`) track unique membership; lists (\`LPUSH\`/\`BRPOP\`) or streams back a simple queue. Picking the structure that matches the access pattern lets Redis do the ordering or deduplication on the server, instead of pulling everything into the app to sort or dedupe in memory.
+
+## Caching personal data
+
+A value cached in Redis for your own app's use is a different layer from HTTP-level caching (\`Cache-Control\`, covered in the HTTP fundamentals topic) — but the same rule applies to both: personal data must never end up somewhere a different user's request could read it, whether that's a shared \`Cache-Control: public\` response or a Redis key that forgot to include the user id.
+`.trim(),
+    realWorldExample: `
+A product page caches each product's price to avoid hitting PostgreSQL on every view:
+\`\`\`ts
+async function getProductPrice(productId: string) {
+  const cached = await redis.get(\`product:\${productId}:price\`);
+  if (cached !== null) return Number(cached);
+
+  const product = await db.product.findUnique({ where: { id: productId } });
+  if (!product) return null; // a missing product is a 404 for the caller to return, not a 500
+
+  await redis.set(\`product:\${productId}:price\`, product.priceCents, { EX: 300 }); // TTL: the safety net
+  return product.priceCents;
+}
+\`\`\`
+Updating the price must also invalidate the cache, in the same code path, after the write commits:
+\`\`\`ts
+async function updateProductPrice(productId: string, priceCents: number) {
+  await db.product.update({ where: { id: productId }, data: { priceCents } });
+  await redis.del(\`product:\${productId}:price\`); // after the commit, not before
+}
+\`\`\`
+Without that \`del\`, the cached price is only ever corrected by its 300-second TTL — a customer can see a stale price for up to five minutes after an admin changes it. There's a subtler race here too: a request that missed the cache moments earlier, read the *old* price, and is only now finishing its own \`redis.set\` can have that write land *after* this \`del\` — reintroducing the stale price right after it was cleared. That race is why the 300-second TTL still matters even with invalidation done correctly: the reintroduced value expires on its own instead of lingering. And even setting that aside, **checkout must still re-read the price from the database**, never from the cache: a cache is a performance optimization for reads a slightly-stale answer doesn't hurt; a charge is not one of those reads.
+
+**A key that's wrong for a different reason.** Caching a personalized response under a key that doesn't vary per user — \`redis.set("me", JSON.stringify(profile))\` for \`GET /api/me\` — serves the first caller's profile to every other caller until the key expires. The fix is folding the user id into the key itself: \`user:\${userId}:profile\`.
+`.trim(),
+    codeExample: `
+import { NextResponse } from "next/server";
+import { z } from "zod";
+
+const paramsSchema = z.object({ id: z.string().min(1) });
+
+// Per-instance only: a multi-instance deployment needs a shared lock (e.g. Redis SETNX),
+// not a local Map, to actually coalesce requests landing on different instances.
+const pending = new Map<string, Promise<number | null>>();
+
+// GET /api/products/[id] — cache-aside, with single-flight coalescing so a hot key's expiry
+// triggers one rebuild per instance, not a stampede of concurrent database reads for it.
+async function getPriceCoalesced(productId: string) {
+  const key = \`product:\${productId}:price\`;
+  const cached = await redis.get(key);
+  if (cached !== null) return Number(cached);
+
+  const inFlight = pending.get(key);
+  if (inFlight) return inFlight; // another request on this instance is already rebuilding this key
+
+  const rebuild = (async () => {
+    const product = await db.product.findUnique({ where: { id: productId } });
+    if (!product) return null; // a missing product is a 404 for the route handler, not a 500
+    await redis.set(key, product.priceCents, { EX: 300 });
+    return product.priceCents;
+  })().finally(() => pending.delete(key));
+
+  pending.set(key, rebuild);
+  return rebuild;
+}
+
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const parsed = paramsSchema.safeParse(await params);
+  if (!parsed.success) return NextResponse.json({ error: "Invalid product id" }, { status: 400 });
+
+  const priceCents = await getPriceCoalesced(parsed.data.id);
+  if (priceCents === null) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  return NextResponse.json({ priceCents });
+}
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Treating cache-aside as handling writes on its own.** The pattern is a convention your code has to apply at every write path; miss one, and that corner silently serves stale data until its TTL (if any) expires.
+- **Caching a personalized response under a key that doesn't vary per caller.** A fast way to serve one user's private data to another.
+- **Setting no TTL at all because "we invalidate everywhere."** Invalidation gets missed in practice; a TTL is the backstop for exactly that.
+- **Treating the cache as the source of truth for something that must be exactly right.** A cached price is fine for display, never for the amount actually charged.
+- **Letting a hot key's expiry hit the database with every concurrent request at once.** A stampede that looks like a database outage, with no coalescing, early refresh, or jitter to spread it out.
+- **Assuming a single-process, in-memory stampede guard protects a multi-instance deployment.** Each instance still has its own gap; only a shared lock (e.g. Redis) closes it across all of them.
+`.trim(),
+  },
+};
+
+const rateLimitingTopic: SeedTopic = {
+  slug: "rate-limiting",
+  title: "Rate limiting",
+  description: "Algorithms, keys, distributed counters and client signalling.",
+  prerequisiteSlugs: ["caching"],
+  lesson: {
+    slug: "essentials",
+    title: "Rate limiting: essentials",
+    level: "INTERMEDIATE",
+    estimatedMinutes: 18,
+    summary:
+      "A rate limiter is only as correct as its counter update is atomic — INCR then a separate EXPIRE call leaves a gap a crash or a race can land in, which is exactly the kind of two-call \"atomic enough\" mistake worth being suspicious of in general.",
+    content: `
+- **Fixed window**: simple, but allows bursts of up to twice the limit around window boundaries.
+- **Sliding window** and **token bucket**: smoother; token bucket allows controlled bursts.
+- Choose the key carefully: API key or user id for authenticated traffic, IP as a coarse fallback (many users can share one IP).
+- With several app instances, counters must live in a shared store such as Redis, or each instance enforces its own limit.
+- Respond with **429 Too Many Requests** and **Retry-After**.
+`.trim(),
+    explanation: `
+## Algorithms: fixed window, sliding window, token bucket
+
+- **Fixed window** counts requests in a clock-aligned window (e.g. "100 per calendar minute"). Simple, but it allows a burst of up to twice the limit right at a window boundary — 100 requests at 12:00:59 and another 100 at 12:01:00 both pass.
+- **Sliding window** counts requests in the last N seconds from *now*, not from a clock boundary, which removes the boundary-burst problem at the cost of a slightly more expensive count.
+- **Token bucket** refills tokens at a steady rate up to a capacity, and each request spends one; it allows a controlled burst (spending saved-up tokens) while still enforcing a long-run average rate, which tends to match how real clients actually behave.
+
+## Choosing what to limit by
+
+Key the limit on the most specific identity you can trust: a user id or API key for authenticated traffic. IP address is a necessary fallback for anonymous traffic, but it's coarse — many real users can share one IP (an office network, a mobile carrier's NAT), and a determined attacker can rotate IPs freely. A login endpoint is usually limited on *both* the account being targeted and the source IP, since either alone misses a real attack shape.
+
+## Why limits need a shared store across instances
+
+An in-memory counter is only exact within the one process holding it. The moment there's more than one instance (several app servers, or serverless functions that come and go), a client's requests spread across them each see only their own slice of traffic — N instances means a client can get roughly N times the intended limit before any single counter trips. A correct limit across instances needs a store every instance shares, typically Redis.
+
+## INCR + EXPIRE is two calls, not one — and that gap matters
+
+A tempting first implementation of a fixed window is: \`INCR\` the key, and if the result is 1 (the first increment), \`EXPIRE\` it so the window resets. That's **two separate round trips, not one atomic operation** — but another request's \`INCR\` landing in between them is harmless; \`INCR\` is itself atomic, so exactly one caller ever sees \`count === 1\` and only that caller calls \`EXPIRE\`. The real risk is that same caller never reaching the \`EXPIRE\` at all: if its process crashes, or the connection times out, right after the \`INCR\`, that key is left with no expiry and counts up forever, permanently rate-limiting whoever it's keyed to. The fix is still to make the whole check-and-increment one atomic unit — a single Lua script (\`EVAL\`) that does both, or \`SET key 0 NX EX seconds\` followed by \`INCR\` (which leaves the key's existing TTL untouched) — so there is no window where the key can exist without one.
+
+## Signalling the limit to the client
+
+Respond with **429 Too Many Requests** and a **Retry-After** header (seconds, or an HTTP date) so a well-behaved client knows how long to back off, rather than retrying immediately and adding to the load that caused the 429 in the first place. Many APIs also expose remaining quota via \`RateLimit-*\` response headers on every request, limited or not, so clients can throttle themselves before ever hitting 429.
+`.trim(),
+    realWorldExample: `
+A login endpoint limits attempts per account to slow down credential stuffing. A first attempt at this looks atomic but isn't:
+\`\`\`ts
+const key = \`login_attempts:\${email}\`;
+const count = await redis.incr(key);
+if (count === 1) {
+  await redis.expire(key, 60); // a separate call — survives concurrent INCRs fine; a crash or timeout right here is the real risk
+}
+if (count > 5) throw new TooManyAttemptsError();
+\`\`\`
+If the process crashes between the two calls — or a deploy restarts it, or the Redis connection just times out — \`key\` is left with no expiry at all. It keeps counting forever, and that account is locked out of logging in for good, not for 60 seconds. (Another request's \`INCR\` landing in that same gap is not the problem — \`INCR\` is atomic, so only the one caller that saw \`count === 1\` is ever responsible for the \`EXPIRE\`.) The fix moves both steps into one atomic Lua script, evaluated by Redis itself in a single round trip:
+\`\`\`ts
+const LIMIT_SCRIPT = \`
+local count = redis.call("INCR", KEYS[1])
+if count == 1 then
+  redis.call("EXPIRE", KEYS[1], ARGV[1])
+end
+return count
+\`;
+const count = await redis.eval(LIMIT_SCRIPT, { keys: [key], arguments: ["60"] });
+if (count > 5) throw new TooManyAttemptsError();
+\`\`\`
+Redis runs the whole script as one indivisible step — no other command for that key can interleave between the \`INCR\` and the \`EXPIRE\`, and if the script runs at all, it runs all the way to the end.
+`.trim(),
+    codeExample: `
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { ipAddress } from "@vercel/functions"; // the IP Vercel's own edge network attached, not a client-set header
+
+const loginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1).max(200), // bound the length — hostile input shouldn't buy unbounded hashing work
+});
+
+// Returns the new count AND the key's remaining TTL, so the caller can report a real wait time
+// instead of always repeating the configured window length, which overstates it once the window
+// is already partway through.
+const LIMIT_SCRIPT = \`
+local count = redis.call("INCR", KEYS[1])
+if count == 1 then
+  redis.call("EXPIRE", KEYS[1], ARGV[1])
+end
+local ttl = redis.call("TTL", KEYS[1])
+return { count, ttl }
+\`;
+
+async function checkLimit(key: string, max: number, windowSeconds: number) {
+  const [count, ttl] = (await redis.eval(LIMIT_SCRIPT, { keys: [key], arguments: [String(windowSeconds)] })) as [
+    number,
+    number,
+  ];
+  return { allowed: count <= max, retryAfterSeconds: ttl };
+}
+
+// POST /api/login — limited per account AND per IP; either alone misses a real attack shape.
+export async function POST(req: Request) {
+  const parsed = loginSchema.safeParse(await req.json());
+  if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+  // Normalized so "Foo@Example.com" and " foo@example.com " share one limiter bucket, not two.
+  const email = parsed.data.email.trim().toLowerCase();
+  const { password } = parsed.data;
+
+  // A client can set its own X-Forwarded-For header; reading it directly lets an attacker pick
+  // whatever IP bucket they like and bypass the per-IP limit entirely. ipAddress() instead reads
+  // the IP Vercel's own edge network attached to the request, which the client cannot override.
+  const ip = ipAddress(req) ?? "unknown";
+  const [byAccount, byIp] = await Promise.all([
+    checkLimit(\`login:account:\${email}\`, 5, 60),
+    checkLimit(\`login:ip:\${ip}\`, 20, 60),
+  ]);
+  if (!byAccount.allowed || !byIp.allowed) {
+    const retryAfter = Math.max(byAccount.retryAfterSeconds, byIp.retryAfterSeconds);
+    return NextResponse.json({ error: "Too many attempts" }, { status: 429, headers: { "Retry-After": String(retryAfter) } });
+  }
+
+  const user = await authenticate(email, password); // identical response and timing whether the email exists or not
+  if (!user) return NextResponse.json({ error: "Invalid email or password" }, { status: 401 });
+  return NextResponse.json({ ok: true });
+}
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Implementing a fixed window as a separate \`INCR\` then \`EXPIRE\` call and calling it done.** That's two round trips, not an atomic operation — the real risk is a crash or timeout before the caller reaches \`EXPIRE\`, not another request's \`INCR\` landing in between (that part is harmless, since \`INCR\` is itself atomic).
+- **Limiting only by IP address.** Many real users can share one IP, and an attacker can rotate IPs; prefer account/API-key identity when the request is authenticated.
+- **Reading a client-settable header (like a raw \`X-Forwarded-For\`) as "the" client IP.** A client can set that header itself unless a trusted proxy normalizes it first; use the IP your platform's own edge attaches (e.g. Vercel's \`ipAddress()\`), not whatever arrived in the request.
+- **Running an in-memory counter across multiple instances and expecting one global limit.** Each instance only ever sees its own slice of traffic.
+- **Retrying a 429 immediately instead of honoring \`Retry-After\`.** That just adds to the load that caused it.
+- **Picking a fixed window without accounting for its boundary-burst behavior**, in a context where that burst actually matters (strict per-second limits, expensive endpoints).
+- **Rate-limiting a login endpoint only by account, with no per-IP limit (or vice versa).** One covers credential stuffing from many IPs against one account; the other covers one IP hammering many accounts. Neither alone catches both shapes.
+- **A pure per-account limit is itself an attack vector.** Anyone who knows (or guesses) a victim's email can deliberately trip it and lock the real user out of their own account — denial of service through the rate limiter. Limiting on the (account, IP) pair raises the cost of that (an attacker now needs many IPs, not just attempts), and progressive delays or a CAPTCHA challenge instead of a hard lockout mean a legitimate user under attack can still get through.
+`.trim(),
+  },
+};
+
+const jobsQueuesTopic: SeedTopic = {
+  slug: "jobs-queues",
+  title: "Background jobs and queues",
+  description: "Offloading work, at-least-once delivery, retries, backoff and dead-letter queues.",
+  prerequisiteSlugs: ["transactions"],
+  lesson: {
+    slug: "essentials",
+    title: "Background jobs and queues: essentials",
+    level: "INTERMEDIATE",
+    estimatedMinutes: 20,
+    summary:
+      "Most queues only promise at-least-once delivery, so a handler that isn't idempotent will eventually run twice for the same job — and reliably getting a job onto the queue at all uses the same transactional outbox pattern as any other dual-write gap.",
+    content: `
+Anything slow or failure-prone that the user does not need to wait for — emails, imports, webhooks out, reports — belongs in a background job.
+
+- Most queues deliver **at least once**: handlers must be idempotent.
+- Retry with **exponential backoff and jitter**; cap attempts and move poison messages to a **dead-letter queue** for inspection.
+- Enqueue reliably with the **transactional outbox** so a job is never lost or sent for a rolled-back change.
+- PostgreSQL can act as a simple queue using \`SELECT ... FOR UPDATE SKIP LOCKED\`.
+`.trim(),
+    explanation: `
+## Why background jobs exist
+
+Anything slow, unreliable, or that the caller doesn't need to wait for — sending an email, calling a third-party API, generating a report, processing an uploaded file — belongs outside the request/response cycle. Moving it into a background job keeps the request fast and lets the work be retried independently of whether the original request's connection is even still open.
+
+## At-least-once delivery means idempotent handlers
+
+Almost every real queue (a cloud queue, a Redis-backed one, a PostgreSQL-backed one) promises **at-least-once** delivery, not exactly-once: a worker can crash after completing the real work but before acknowledging the message, so the system redelivers it, and the same job runs again.
+
+For a side effect that's entirely inside your own database — inserting a row, updating a balance — idempotency is straightforward: do the write and record that it happened in the same transaction, and skip work whose id is already recorded. A side effect that leaves your database, like sending an email, doesn't have that luxury: there's no transaction spanning your database and the email provider, so "send the email" and "record that it was sent" are two separate steps with no way to make them atomic with each other. Recording *before* sending risks marking something done that a crash then prevents from ever actually happening; recording *after* sending risks a crash in the gap between the two, where redelivery runs the handler again with no record that the first send happened. Exactly-once delivery of the email itself isn't achievable this way — the practical fix is to make the *external call* idempotent: pass a deterministic key (the job's own id is a natural choice) to the provider, if it supports one, so the provider's own dedupe catches a retried call even when your bookkeeping couldn't. Recording after a successful send is still worth doing, as a fast-path skip and for monitoring — just don't mistake it for the guarantee; the idempotency key is what actually prevents the duplicate. That key only protects *retries*, though, not a replay days later — providers keep idempotency keys for a limited window (often around 24 hours), so it dedupes the crash-and-redeliver case this section is about, not a job that somehow re-runs long after the fact.
+
+## Enqueueing reliably: the transactional outbox, again
+
+Getting a job onto the queue has the same "two systems, one write" problem the transactions topic's outbox pattern solves: committing a business write and then separately calling the queue leaves a crash in between to either lose the job (write committed, no job) or create one for a change that never happened (job enqueued, then the write's transaction rolls back). Insert the job as a row in the *same* database transaction as the business write it belongs to, and have a separate relay or poller move outbox rows onto the real queue — the job can now only be "for a write that really committed" or "not sent yet."
+
+## Retries: exponential backoff with jitter, and a dead-letter queue
+
+A transient failure (a downstream timeout, a momentary outage) deserves a retry, but not an immediate one — exponential backoff (1s, 2s, 4s, 8s…) gives the dependency time to recover, and jitter (randomizing each delay slightly) stops thousands of simultaneously-failed jobs from retrying in synchronized waves that re-create the outage they're recovering from. Cap the delay itself too (an hour is a common ceiling) — otherwise a job that's been failing for a while waits longer between attempts than anyone actually wants, long before it's useful. Cap the number of attempts as well: a job that keeps failing past that cap moves to a **dead-letter queue** instead of retrying forever or silently vanishing, so it's visible, inspectable, and can be fixed and replayed once the real problem is understood. Not every failure deserves a retry at all — a validation error fails exactly the same way every time, so retrying it just delays finding out it needs a human.
+
+## PostgreSQL as a simple queue: claim, commit, then process
+
+For modest volume, a plain table can be a serviceable queue, claimed in one short transaction: \`SELECT ... WHERE status = 'PENDING' ... FOR UPDATE SKIP LOCKED\` to pick an unclaimed row, then \`UPDATE\` that same row to \`PROCESSING\` before committing. \`FOR UPDATE\` locks the row a worker selects; \`SKIP LOCKED\` tells other concurrent workers to pass over rows someone else already has locked rather than block on them — many workers can claim different rows at once, with no two ever claiming the same one.
+
+The row lock itself only lasts for the transaction: \`FOR UPDATE\` run outside of one (or whose transaction has already ended) releases the lock the instant that single statement finishes. That's why the claim has to commit the \`PROCESSING\` status *before* the lock goes away — it's the status, not the lock, that stops a second worker from picking up this job once this transaction ends. And the actual work — the send, the API call, anything slow or failure-prone — has to happen **after** this claim transaction commits, never inside it: the transactions topic's "keep it short, no network calls inside it" rule applies here too, and a long-held lock on the queue table would stall every other worker trying to claim a job.
+
+Marking a row \`PROCESSING\` creates one more failure mode worth planning for: a worker that claims a job and then crashes (or is killed) leaves it stuck \`PROCESSING\` forever, invisible to new claims, which only look at \`PENDING\`. The fix is a \`lockedUntil\` timestamp set during the claim, and a periodic recovery sweep that resets any row still \`PROCESSING\` past its \`lockedUntil\` back to \`PENDING\`, so another worker can pick it up.
+
+## Validate job payloads like any other untrusted input
+
+A job's payload crossed a trust boundary the moment it was created from a request — by the time a worker (possibly a different process, possibly days later, possibly after a schema change) reads it back, it's untrusted input again, not a value you can assume is still well-formed. Validate it with the same rigor as a request body, and prefer passing ids in the payload (loading current data when the job actually runs) over embedding a full snapshot, which can go stale between enqueue and execution.
+`.trim(),
+    realWorldExample: `
+Placing an order must reliably queue a confirmation email — not lose it if the process crashes, and not send it twice on redelivery.
+
+**Enqueueing, in the same transaction as the order:**
+\`\`\`ts
+const order = await db.$transaction(async (tx) => {
+  const created = await tx.order.create({ data: { userId, productId, quantity } });
+  await tx.outboxJob.create({
+    data: {
+      kind: "SEND_ORDER_CONFIRMATION",
+      payload: { orderId: created.id },
+      status: "PENDING",
+      nextAttemptAt: new Date(),
+    },
+  });
+  return created;
+});
+\`\`\`
+If this transaction rolls back for any reason, neither the order nor the job exists — there is no window where one was created without the other.
+
+**Claiming a job, in one short transaction:**
+\`\`\`sql
+SELECT id FROM "OutboxJob"
+WHERE status = 'PENDING' AND "nextAttemptAt" <= now()
+ORDER BY "createdAt"
+LIMIT 1
+FOR UPDATE SKIP LOCKED;
+
+UPDATE "OutboxJob" SET status = 'PROCESSING', "lockedUntil" = now() + interval '5 minutes' WHERE id = $1;
+COMMIT;
+\`\`\`
+Whichever worker's \`SELECT\` runs first locks that row; every other worker's identical query skips straight past it. The transaction commits the \`PROCESSING\` status before the worker does anything else — the row's lock disappears the instant this transaction ends, so it's that committed status, not the lock, that stops a second worker from re-claiming it. The actual send happens after this commits, never inside the transaction.
+
+**Sending is where ordering matters.** Recording "sent" before calling the email provider would mark the job done even if the process then crashes before the call ever goes out — the confirmation would never arrive, with nothing to show anything went wrong. Instead, the handler passes the job's own id as an idempotency key to the provider, and only records a \`sentOrderConfirmation\` row *after* the call succeeds. A crash between the send and that record is still survivable: redelivery runs the handler again, and the provider's own idempotency key makes the repeated call a safe no-op rather than a second email — delivery itself can't be made exactly-once from this side, only safe to retry.
+`.trim(),
+    codeExample: `
+import { z } from "zod";
+import { Prisma } from "@prisma/client";
+
+const confirmationPayloadSchema = z.object({ orderId: z.string().min(1) });
+
+class PermanentJobError extends Error {} // retrying this would never help
+
+const LOCK_DURATION_MS = 5 * 60_000;
+const MAX_BACKOFF_MS = 60 * 60_000; // cap at 1 hour — otherwise a long-failing job waits longer
+
+// Claims one job in a short transaction: the row lock itself releases the instant the transaction
+// ends, so committing PROCESSING here — not the lock — is what stops another worker re-claiming it.
+async function claimNextJob() {
+  return db.$transaction(async (tx) => {
+    const [row] = await tx.$queryRaw<{ id: string }[]>\`
+      SELECT id FROM "OutboxJob"
+      WHERE status = 'PENDING' AND "nextAttemptAt" <= now()
+      ORDER BY "createdAt"
+      LIMIT 1
+      FOR UPDATE SKIP LOCKED
+    \`;
+    if (!row) return null;
+    return tx.outboxJob.update({
+      where: { id: row.id },
+      data: { status: "PROCESSING", lockedUntil: new Date(Date.now() + LOCK_DURATION_MS) },
+    });
+  });
+}
+
+// A separate, periodic sweep: a worker that claimed a job and then crashed leaves it stuck
+// PROCESSING forever, invisible to claimNextJob's PENDING-only WHERE clause.
+async function recoverStuckJobs() {
+  await db.outboxJob.updateMany({
+    where: { status: "PROCESSING", lockedUntil: { lt: new Date() } },
+    data: { status: "PENDING" },
+  });
+}
+
+// Runs after claimNextJob's transaction has already committed — never inside it.
+async function processJob(job: { id: string; kind: string; payload: unknown }) {
+  if (job.kind !== "SEND_ORDER_CONFIRMATION") throw new PermanentJobError(\`Unknown job kind: \${job.kind}\`);
+
+  // Untrusted again by the time a worker reads it back — validate, don't assume.
+  const parsed = confirmationPayloadSchema.safeParse(job.payload);
+  if (!parsed.success) throw new PermanentJobError("Malformed job payload");
+  const { orderId } = parsed.data;
+
+  // Fast path: a previous attempt at this exact job already sent and recorded it.
+  const already = await db.sentOrderConfirmation.findUnique({ where: { orderId } });
+  if (already) return;
+
+  const order = await db.order.findUniqueOrThrow({ where: { id: orderId } }); // fresh data, not a stale snapshot
+
+  // The idempotency key — not the record below — is what actually prevents a duplicate send: the
+  // provider dedupes retried calls sharing one key, so a crash between the send and the record
+  // still can't produce two emails, only at worst a provider call that is a safe no-op.
+  await sendEmail(order.userEmail, "order-confirmation", { orderId }, { idempotencyKey: job.id });
+
+  try {
+    await db.sentOrderConfirmation.create({ data: { orderId } });
+  } catch (err) {
+    // A duplicate here means the send and the record both already happened — the fast-path check
+    // above just didn't see it in time (e.g. a racing redelivery). Treating this as a failure would
+    // retry, and eventually dead-letter, a job that actually finished; it never got marked DONE.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") return;
+    throw err;
+  }
+}
+
+async function runWithRetry(job: { id: string; kind: string; payload: unknown; attempts: number }, maxAttempts = 5) {
+  try {
+    await processJob(job);
+    await db.outboxJob.update({ where: { id: job.id }, data: { status: "DONE" } });
+  } catch (err) {
+    if (err instanceof PermanentJobError || job.attempts + 1 >= maxAttempts) {
+      await db.outboxJob.update({ where: { id: job.id }, data: { status: "DEAD_LETTER", lastError: String(err) } });
+      return;
+    }
+    const delayMs = Math.min(2 ** job.attempts * 1000 + Math.random() * 1000, MAX_BACKOFF_MS); // backoff + jitter, capped
+    await db.outboxJob.update({
+      where: { id: job.id },
+      data: { status: "PENDING", attempts: { increment: 1 }, nextAttemptAt: new Date(Date.now() + delayMs) },
+    });
+  }
+}
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Writing a handler that assumes it will only ever run once per job.** At-least-once delivery means redelivery is normal, not an edge case; without an idempotency check, a retried or redelivered job doubles the side effect.
+- **Recording an external side effect as "done" before actually doing it.** A crash right after the record, before the real call goes out, marks something done that never happened. Record after a successful call instead, and make the call itself idempotent (a key tied to the job id) for the gap that ordering still leaves open.
+- **Relying on a \`SELECT ... FOR UPDATE\` row lock, by itself, to stop two workers claiming the same job.** The lock releases the instant its transaction ends; without committing a status change (e.g. to \`PROCESSING\`) before that happens, nothing stops a second worker from claiming the same row right after.
+- **Leaving no way to recover a job stuck \`PROCESSING\` after the worker that claimed it crashes.** A \`lockedUntil\` timestamp and a periodic sweep that resets expired claims back to \`PENDING\` is what makes that recoverable instead of permanent.
+- **Enqueueing a job with a separate call after (or before) committing the business write.** A crash in between either loses the job or creates one for a change that never happened. Use the same transactional outbox pattern as any other "write here, then notify there" gap.
+- **Retrying every failure the same way.** A permanent error (a bad payload, a business rule that will never pass) just wastes every retry attempt and delays finding out it needs a human; only retry errors that are plausibly transient.
+- **Retrying immediately, with no backoff or jitter — or with backoff that is never capped.** Synchronized immediate retries can re-create the very outage they're recovering from, and an uncapped exponential delay can grow to hours or days between attempts long before that's useful; cap it.
+- **Embedding a full data snapshot in the job payload instead of just the id.** The snapshot can be stale by the time the job actually runs; load current data at execution time instead.
+- **Trusting a job's payload because your own code enqueued it.** It crossed a trust boundary once already and can be read back by a different process, after a schema change, or much later; validate it like any other untrusted input.
+`.trim(),
+  },
+};
+
 const topics: SeedTopic[] = [
   httpTopic,
   restTopic,
@@ -1271,34 +1852,10 @@ const topics: SeedTopic[] = [
   prismaTopic,
   joinsIndexesTopic,
   transactionsTopic,
-  t("pagination", "Pagination, filtering, and sorting", "Offset vs cursor pagination, stable ordering and safe query parameters.", `
-- **Offset** (\`LIMIT 20 OFFSET 400\`) is simple and supports page numbers, but deep pages get slower and concurrent inserts shift rows (duplicates or skipped items).
-- **Cursor/keyset** (\`WHERE (created_at, id) < ($1, $2) ORDER BY created_at DESC, id DESC LIMIT 20\`) stays fast at any depth and is stable under inserts.
-- Always sort by a unique tiebreaker (usually id) so order is deterministic.
-- Whitelist sortable/filterable fields and cap the page size.
-`),
-  t("caching", "Caching and Redis concepts", "Cache-aside, TTLs, invalidation, stampedes and Redis data structures.", `
-- **Cache-aside**: read from cache; on miss, read the database and populate the cache with a TTL. On writes, update the database and delete (or update) the cache entry.
-- Every cached value needs an expiry and an invalidation story; stale data is the main cost of caching.
-- **Stampede**: when a hot key expires, many requests hit the database at once. Mitigate with request coalescing/locks, early refresh and jittered TTLs.
-- Cache keys must include everything that changes the result — especially the user id for per-user data.
-- Redis offers strings, hashes, lists, sets and sorted sets (great for leaderboards and rate limiting).
-`),
-  t("rate-limiting", "Rate limiting", "Algorithms, keys, distributed counters and client signalling.", `
-- **Fixed window**: simple, but allows bursts of up to twice the limit around window boundaries.
-- **Sliding window** and **token bucket**: smoother; token bucket allows controlled bursts.
-- Choose the key carefully: API key or user id for authenticated traffic, IP as a coarse fallback (many users can share one IP).
-- With several app instances, counters must live in a shared store such as Redis, or each instance enforces its own limit.
-- Respond with **429 Too Many Requests** and **Retry-After**.
-`),
-  t("jobs-queues", "Background jobs and queues", "Offloading work, at-least-once delivery, retries, backoff and dead-letter queues.", `
-Anything slow or failure-prone that the user does not need to wait for — emails, imports, webhooks out, reports — belongs in a background job.
-
-- Most queues deliver **at least once**: handlers must be idempotent.
-- Retry with **exponential backoff and jitter**; cap attempts and move poison messages to a **dead-letter queue** for inspection.
-- Enqueue reliably with the **transactional outbox** so a job is never lost or sent for a rolled-back change.
-- PostgreSQL can act as a simple queue using \`SELECT ... FOR UPDATE SKIP LOCKED\`.
-`),
+  paginationTopic,
+  cachingTopic,
+  rateLimitingTopic,
+  jobsQueuesTopic,
   t("webhooks", "Webhooks and polling", "Push vs pull integration, signature verification and robust receivers.", `
 - **Polling** asks repeatedly ("anything new?"); simple but wasteful and delayed. **Webhooks** push events to your endpoint as they happen.
 - Verify every webhook: compute an HMAC over the **raw** request body with the shared secret, compare in constant time, and reject old timestamps to stop replays.
