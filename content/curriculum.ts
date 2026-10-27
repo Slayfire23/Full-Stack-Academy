@@ -46,13 +46,6 @@ export const tracks: SeedTrack[] = [
   { slug: "system-design", title: "System Design", description: "Coming soon: large-scale architecture case studies.", published: false, order: 5 },
 ];
 
-const t = (slug: string, title: string, description: string, content: string): SeedTopic => ({
-  slug,
-  title,
-  description,
-  lesson: { slug: "essentials", title: `${title}: essentials`, content: content.trim() },
-});
-
 const httpTopic: SeedTopic = {
   slug: "http",
   title: "HTTP fundamentals and status codes",
@@ -2471,6 +2464,673 @@ async function runNightlyReconciliationOnce() {
   },
 };
 
+const observabilityTopic: SeedTopic = {
+  slug: "observability",
+  title: "Logging, monitoring, and error handling",
+  description: "Structured logs, metrics, traces, alerting and safe error responses.",
+  prerequisiteSlugs: ["rest"],
+  lesson: {
+    slug: "essentials",
+    title: "Logging, monitoring, and error handling: essentials",
+    level: "INTERMEDIATE",
+    estimatedMinutes: 18,
+    summary:
+      "Logs, metrics and traces answer different questions — what happened, is something trending wrong, and where in the request did it happen — and none of them are worth collecting if a label choice makes the metrics backend fall over or a log line hands out a session token.",
+    content: `
+- **Logs** explain individual events; **metrics** show trends and trigger alerts; **traces** follow one request across services.
+- Log structured JSON with a request/correlation id; never log passwords, tokens or full card numbers.
+- Watch the golden signals: latency, traffic, errors, saturation.
+- Clients get a generic error and a request id; the logs get the details.
+- Alert on symptoms users feel (error rate, latency SLOs), not on every internal blip.
+`.trim(),
+    explanation: `
+## Logs, metrics, traces — three different questions
+
+**Logs** record individual events with full detail — one request, one error, one state change. **Metrics** are numeric time series — a request count, an error rate, a latency percentile — cheap to store and alert on, because they're already aggregated. **Traces** follow one request as it crosses services, as a tree of timed spans. A rough way to remember the split: metrics tell you *something* is wrong, traces tell you *where*, logs tell you *why*.
+
+## Structured logging, and what never belongs in a log line
+
+Log structured JSON (level, message, timestamp, a request/correlation id, and whatever fields the event needs) instead of free text — a log platform can filter and aggregate "every error for request abc123" or "p95 duration for this route" against structured fields, but has to fall back to fragile regexes against prose. A correlation id, generated once at the edge of the system and passed through every service call and log line for that one request, is what ties a user's bug report back to the exact chain of log lines that explain it.
+
+What never goes in, structured or not: passwords, session tokens, API keys, full card numbers, or anything else you're not allowed to retain. Logs are copied into log platforms, backups, and sometimes third-party tools, and kept for a long time — a secret that leaks into a log line is a breach the moment it's written, not a hypothetical one. Redact sensitive fields in the logger's own configuration (a deny-list of field names, or structured redaction) so it doesn't depend on every call site remembering not to log the wrong thing.
+
+## The golden signals
+
+Latency, traffic, errors, and saturation — a sensible default set of things to put on a dashboard and alert on for almost any service. Latency separates successful and failed requests (a fast error is not the same signal as a fast success); traffic is demand; errors is the failure rate; saturation is how full your most constrained resource is (CPU, memory, a connection pool, an event loop).
+
+## Cardinality: why a metric label can be more dangerous than a log field
+
+A log line can safely include a user id or a full URL — a log is just a stored event, as many distinct values as actually occurred. A **metric label** is different: most metrics backends create a separate time series for every distinct combination of label values, so a label with high cardinality — a raw user id, a URL with its query string, anything with effectively unbounded distinct values — multiplies the number of time series the backend has to store and query, often enough to measurably slow it down or blow through its cost or storage limits. Label metrics by bounded things instead: a route *template* (\`/orders/:id\`, not \`/orders/42\`), a status code class, a method — fields with a small, known number of possible values — and put the high-cardinality detail (the actual user id, the actual URL) in a log line or a trace span instead, where it belongs.
+
+## Safe error responses: generic to the client, detailed on the server
+
+An unhandled exception should turn into a generic error message, an appropriate status code, and a request id for the client — never a stack trace, a SQL query, or any other internal detail, all of which are a gift to anyone probing the API. The same request id lets you find the full, detailed error — stack trace included — in the server-side logs, where only your own team can read it. This is the same shape as the identical-response-either-way pattern the authentication and authorization topic teaches for login failures: the information a response reveals is a design decision, not an accident.
+
+## Alerting on symptoms, not every cause
+
+Page a human for things users actually feel — an elevated error rate, a latency SLO burning through its error budget — not for every internal blip that could, in theory, be a precursor to one. A dashboard can show cause-level signals (CPU, a single slow dependency) for someone to look at during business hours; what pages someone at 2 a.m. should be the symptom a customer would notice, with a runbook attached, so the alert is actually actionable and rare enough to stay trusted.
+`.trim(),
+    realWorldExample: `
+A request-logging wrapper generates (or forwards) a correlation id and attaches it to every log line for that request:
+\`\`\`ts
+const requestId = req.headers.get("x-request-id") ?? crypto.randomUUID();
+logger.info({ requestId, method: req.method, route }, "request started");
+\`\`\`
+Every downstream log call for this request includes the same \`requestId\`, so a support ticket referencing it finds every line that explains what happened.
+
+**A metrics mistake that looks harmless until it isn't.** Recording request duration with the raw path as a label:
+\`\`\`ts
+histogram.observe({ route: req.url }, durationMs); // every distinct URL becomes its own time series
+\`\`\`
+\`/orders/42\`, \`/orders/43\`, \`/orders/44\`... each creates a new time series, forever, as new orders are created — the metrics backend's storage grows without bound. Labeling by the route's *template* instead keeps the label space fixed no matter how many orders exist:
+\`\`\`ts
+histogram.observe({ route: "/orders/:id" }, durationMs); // one time series, regardless of order id
+\`\`\`
+
+**A safe error response**, with the real detail only in the log:
+\`\`\`ts
+} catch (err) {
+  logger.error({ requestId, err }, "unhandled error"); // full stack trace, server-side only
+  return NextResponse.json({ error: "Something went wrong", requestId }, { status: 500 });
+}
+\`\`\`
+`.trim(),
+    codeExample: `
+import { NextResponse } from "next/server";
+
+const REDACTED_FIELDS = new Set(["password", "token", "authorization", "idempotencykey", "cookie"]);
+
+// Recurses into nested objects and arrays — a secret buried under { body: { password } } would
+// survive a top-level-only redaction.
+function redactValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([k, v]) => [
+        k,
+        REDACTED_FIELDS.has(k.toLowerCase()) ? "[redacted]" : redactValue(v),
+      ]),
+    );
+  }
+  return value;
+}
+function redact(fields: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(fields).map(([key, value]) => [key, REDACTED_FIELDS.has(key.toLowerCase()) ? "[redacted]" : redactValue(value)]),
+  );
+}
+
+function logStructured(level: "info" | "error", fields: Record<string, unknown>, message: string) {
+  console[level === "error" ? "error" : "log"](JSON.stringify({ level, message, ...redact(fields) }));
+}
+
+// A request-id header is client-supplied — accepting it unchecked lets a caller inject control
+// characters (fake log lines) or an unbounded string into every log line for this request.
+// Validate its shape, or generate a fresh one; never trust it blindly into structured logs.
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+function resolveRequestId(header: string | null) {
+  return header && REQUEST_ID_PATTERN.test(header) ? header : crypto.randomUUID();
+}
+
+// Wraps a route handler with a correlation id, structured request/error logs, and a metric
+// labeled by the route's fixed template — never the raw, unbounded path — to keep cardinality
+// bounded regardless of how many distinct resources exist. Threads Next.js 15's params (a
+// Promise) straight through, rather than re-deriving a dynamic segment from the raw request.
+function withObservability<Params>(
+  routeTemplate: string,
+  handler: (req: Request, ctx: { params: Params; requestId: string }) => Promise<Response>,
+) {
+  return async (req: Request, { params }: { params: Params }) => {
+    const requestId = resolveRequestId(req.headers.get("x-request-id"));
+    const startedAt = Date.now();
+    logStructured("info", { requestId, method: req.method, route: routeTemplate }, "request started");
+
+    try {
+      const res = await handler(req, { params, requestId });
+      recordLatency(routeTemplate, res.status, Date.now() - startedAt); // bounded labels: template + status
+      return res;
+    } catch (err) {
+      // Full detail — stack trace included — goes to the server-side log only.
+      logStructured("error", { requestId, route: routeTemplate, err: err instanceof Error ? err.stack : String(err) }, "unhandled error");
+      recordLatency(routeTemplate, 500, Date.now() - startedAt);
+      // The client gets a generic message, a 500, and the same request id — enough to report
+      // the problem, never enough to learn anything about the server's internals.
+      return NextResponse.json({ error: "Something went wrong", requestId }, { status: 500 });
+    }
+  };
+}
+
+export const GET = withObservability<Promise<{ id: string }>>("/api/orders/:id", async (req, { params, requestId }) => {
+  const { id } = await params;
+  const userId = await requireUserId(req);
+  const order = await db.order.findFirst({ where: { id, userId } }); // ownership folded in
+  if (!order) return NextResponse.json({ error: "Not found", requestId }, { status: 404 });
+  return NextResponse.json(order);
+});
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Logging free text instead of structured fields.** Impossible to filter or aggregate reliably, and it quietly encourages writing a secret into a format string without noticing.
+- **Logging (or otherwise storing) a password, token, API key, or full card number anywhere, even temporarily "for debugging."** Logs are copied widely and kept a long time; redact at the logger's own configuration level, not by hoping every call site remembers.
+- **Labeling a metric with a raw, effectively unbounded value** (a user id, a full URL, a raw path). Each distinct value becomes a new time series, and the backend's storage and cost grow without bound. Label by a fixed template or category instead, and put the specific value in a log or trace.
+- **Returning a stack trace, a SQL error, or other internal detail to the client.** It's free reconnaissance for an attacker and useless to a legitimate caller; return a generic message and a request id, and log the detail server-side.
+- **No correlation id, or one that doesn't survive a hop to another service.** Without it, reconstructing one request's path across several services means guessing from timestamps.
+- **Paging a human for every internal signal that *might* precede a problem**, instead of the symptom a customer would actually feel. Alert fatigue makes every page — including the real ones — easier to ignore.
+- **Putting a dependency's health check in a liveness probe (restarts the instance) when a readiness probe (routes around it) is what's needed.** Covered in depth in the load balancing and scalability topic.
+`.trim(),
+  },
+};
+
+const scalabilityTopic: SeedTopic = {
+  slug: "scalability",
+  title: "Load balancing and scalability",
+  description: "Horizontal scaling, stateless services, health checks and read replicas.",
+  prerequisiteSlugs: ["caching"],
+  lesson: {
+    slug: "essentials",
+    title: "Load balancing and scalability: essentials",
+    level: "INTERMEDIATE",
+    estimatedMinutes: 20,
+    summary:
+      "Horizontal scaling only works if any instance can handle any request — which means sessions, uploads and caches move out of an instance's own memory into something every instance shares, and \"just add a read replica\" trades write-path simplicity for a lag window every read has to account for.",
+    content: `
+- **Vertical** scaling buys a bigger machine; **horizontal** scaling adds machines behind a load balancer.
+- Horizontal scaling requires **stateless** app servers: sessions, uploads and caches live in shared stores.
+- Load balancers distribute traffic (round robin, least connections) and use **health checks** to stop routing to unhealthy instances.
+- Databases scale reads with replicas (beware replication lag), and writes with partitioning/sharding — a much bigger step.
+- Measure first: find the actual bottleneck before scaling anything.
+`.trim(),
+    explanation: `
+## Vertical vs horizontal scaling
+
+**Vertical** scaling buys a bigger machine — more CPU, memory, faster disks. Simple, but it has a ceiling, and the bigger machine is still a single point of failure. **Horizontal** scaling adds more machines and spreads load across them — more resilient, and it can keep growing past where any single machine could, but it demands more of the architecture: anything that assumed "one process, one place" now has to work across many.
+
+## Statelessness: the precondition for horizontal scaling
+
+Horizontal scaling only works if any instance can handle any request. The moment per-user state — a session, an uploaded file still sitting on local disk, an in-memory cache that has to stay consistent — lives on one instance's own memory or disk, a user routed to a different instance loses it, and an instance that restarts or scales down loses it for everyone. Sessions move to a shared store (the database, Redis); uploads move to object storage; anything cached in memory either moves to a shared cache (the caching topic) or has to tolerate being wrong on some fraction of instances.
+
+## Load balancers: layer 4 vs layer 7, and health checks
+
+A **layer 4** load balancer works at the TCP/UDP level — fast, protocol-agnostic, routing by address and port without reading HTTP. A **layer 7** load balancer understands HTTP, so it can route by path or header, terminate TLS, and retry a failed request against a different instance. Either way, it needs **health checks** to know which instances can actually take traffic — routing to one that's up but broken is worse than routing to one fewer instance.
+
+## Liveness vs readiness — getting this backwards costs more than it saves
+
+A **liveness** check asks "is this process alive, or should it be restarted?" A **readiness** check asks "can this instance serve traffic right now?" — dependencies reachable, warmed up, not mid-shutdown. Failing liveness restarts the instance; failing readiness just stops new traffic from reaching it, without restarting anything. Putting a database check in the *liveness* probe is the classic way to get this backwards: a database blip now restarts every instance at once, turning a small, recoverable outage into a bigger one than the database blip itself ever was. A database check belongs in readiness, where the fix for "the database is unreachable" is "stop sending this instance traffic," not "kill the process and start a new one with the exact same problem."
+
+## Scaling reads: caching, then replicas, and the lag they bring
+
+Before adding infrastructure, find out what's actually slow — the right fix for one bad query is an index, not a fleet of new servers. Once reads genuinely outgrow one database, caching (its own topic) absorbs the hottest, most repeated reads first, cheaply. **Read replicas** come next: copies of the primary that serve read-only queries, so read load spreads across more than one machine. The cost is **replication lag** — a replica's data is always some small, variable amount of time behind the primary, because replication is asynchronous. A user who just wrote something and immediately reads it back can see their own change missing if that read lands on a replica that hasn't caught up yet — the **read-your-writes** problem. The usual fix is routing reads that must be fresh (anything right after that same user's own write) back to the primary for a short window, and sending everything else to replicas.
+
+## Serverless and the connection problem
+
+A traditional app server opens a modest, fixed-size pool of database connections once and reuses it for every request it ever handles. A serverless function doesn't get that luxury: each invocation can be a fresh process, and under real traffic, many invocations run concurrently — each one potentially opening its own connection, with no shared pool between them, because there's no long-lived process for a pool to live in. PostgreSQL's own connection limit is modest — \`max_connections\` defaults to 100, and many managed plans set it lower still — and a traffic spike that spins up even a few dozen concurrent serverless invocations can exhaust it in seconds, well before CPU or memory ever becomes the bottleneck. The fix is a **connection pooler** sitting in front of the database — PgBouncer, or a managed equivalent like Supabase's transaction pooler (what this project's own production deployment uses) — which holds the real, limited set of database connections itself and multiplexes many short-lived client connections onto them, so a thousand serverless invocations can share a handful of actual database connections instead of each claiming its own.
+
+## Measure first; sharding is a last resort, not a first step
+
+Partitioning or sharding — splitting different subsets of the *data itself* across multiple databases — scales writes past what a single primary can handle, but it's a much bigger step than anything above: it needs a shard key that spreads load evenly, a story for queries that need to cross shards, and a rebalancing plan for when one shard outgrows the others. Exhaust the simpler options first — indexes, caching, read replicas, a bigger primary — and reach for sharding only once writes themselves, not reads, are the actual, measured bottleneck.
+`.trim(),
+    realWorldExample: `
+A read-heavy product API starts timing out under load. Checking first, not guessing: query stats show one query — filtering products by category, sorted by recency — accounts for most of the database's time, with no supporting index. Adding the matching composite index fixes most of it immediately, for the cost of one migration, not a single new server.
+
+Once reads genuinely outgrow the primary even with that index, a replica takes read traffic, with its lag handled explicitly:
+\`\`\`ts
+async function getProduct(id: string) {
+  return readReplica.product.findUnique({ where: { id } }); // fine to be a few hundred ms stale
+}
+async function getMyRecentOrder(userId: string, orderId: string) {
+  return primaryDb.order.findFirst({ where: { id: orderId, userId } }); // read-your-writes: use the primary
+}
+\`\`\`
+
+**Health checks, the right way round.** A readiness probe, not a liveness probe, depends on the database:
+\`\`\`ts
+// /api/health/ready — database down? Stop routing here. Don't restart this process.
+export async function GET() {
+  try {
+    await db.$queryRaw\`SELECT 1\`;
+    return NextResponse.json({ status: "ready" });
+  } catch {
+    return NextResponse.json({ status: "not ready" }, { status: 503 });
+  }
+}
+// /api/health/live — only checks that the process itself can respond at all.
+export async function HEAD() {
+  return new NextResponse(null, { status: 200 });
+}
+\`\`\`
+`.trim(),
+    codeExample: `
+import { PrismaClient } from "@prisma/client";
+import { NextResponse } from "next/server";
+
+// One PrismaClient per process still matters in serverless (the Prisma ORM topic covers why) —
+// the actual fix for connection exhaustion under many concurrent invocations is DATABASE_URL
+// itself pointing at a transaction pooler (PgBouncer, or Supabase's transaction pooler in
+// production), which multiplexes many short-lived client connections onto a small, fixed pool
+// of real database connections. No client-side setting here substitutes for that.
+const primary = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL });
+const replica = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL_REPLICA ?? process.env.DATABASE_URL });
+
+// Reads that can tolerate being a little stale go to the replica; anything that must reflect
+// the caller's own just-made write goes to the primary — the read-your-writes fix for
+// replication lag.
+async function getProductForCatalog(id: string) {
+  return replica.product.findUnique({ where: { id } });
+}
+async function getMyOrderAfterCreating(userId: string, orderId: string) {
+  return primary.order.findFirst({ where: { id: orderId, userId } }); // folded ownership, and the primary
+}
+
+// GET /api/health/ready — a dependency check belongs here, not in a liveness probe: failing
+// readiness removes this instance from the load balancer without restarting it, so a database
+// blip doesn't turn into every instance restarting at once.
+export async function GET() {
+  try {
+    await primary.$queryRaw\`SELECT 1\`;
+    return NextResponse.json({ status: "ready" });
+  } catch {
+    return NextResponse.json({ status: "not ready" }, { status: 503 });
+  }
+}
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Scaling vertically or horizontally before measuring what's actually slow.** An index or a cache fixes most "add more servers" problems for a fraction of the cost.
+- **Keeping per-user state (sessions, uploads, an in-memory cache) on one instance.** Any instance may get any request; state has to live somewhere every instance shares.
+- **Putting a dependency check in a liveness probe.** A database blip then restarts every instance at once instead of just routing around the ones affected.
+- **Reading a just-written row from a replica and treating missing data as a bug in the write.** It's replication lag; route read-your-writes cases back to the primary.
+- **Running serverless functions against a database with no connection pooler in front of it.** Many concurrent invocations each opening their own connection can exhaust PostgreSQL's connection limit long before CPU or memory becomes the bottleneck.
+- **Reaching for sharding as a first step.** It's a much bigger commitment (a shard key, cross-shard queries, rebalancing) than the simpler options — indexes, caching, replicas — that usually solve the actual problem.
+- **Relying on sticky sessions instead of a shared session store.** It unevenly loads instances and loses the session the moment the pinned instance dies or is scaled down.
+`.trim(),
+  },
+};
+
+const devopsTopic: SeedTopic = {
+  slug: "devops",
+  title: "Docker, CI/CD, and cloud deployment",
+  description: "Containers, pipelines, configuration and safe database migrations.",
+  prerequisiteSlugs: ["postgres"],
+  lesson: {
+    slug: "essentials",
+    title: "Docker, CI/CD, and cloud deployment: essentials",
+    level: "INTERMEDIATE",
+    estimatedMinutes: 20,
+    summary:
+      "A multi-stage Dockerfile and a green CI pipeline only earn their keep at the one moment that matters — the migration step — where the usual rollback safety net stops applying, because rolling back code is instant but a migration that already changed real data often can't be undone the same way.",
+    content: `
+- Containers package an app with its dependencies and share the host kernel; VMs virtualize a whole machine.
+- Multi-stage Dockerfiles build in one stage and copy only the output into a small runtime image; run as a non-root user.
+- CI runs type checks, lint, tests and builds on every change; CD deploys passing builds automatically.
+- Configuration and secrets come from the environment, never baked into images or committed to git.
+- Run migrations as an explicit release step, and make schema changes backward compatible (**expand → migrate → contract**) so old and new code can run side by side.
+`.trim(),
+    explanation: `
+## Containers vs VMs
+
+A **container** packages an application with its dependencies and runs as an isolated process sharing the host's kernel — fast to start, lightweight, good for many small services. A **virtual machine** virtualizes a whole machine, including its own kernel — stronger isolation, but heavier and slower to start. Most backend deployments today are containers for the app, often running on a platform that handles the VM layer underneath.
+
+## Multi-stage Dockerfiles
+
+Build in one stage — with dev dependencies, a compiler, everything the build needs — then copy only the build output into a slim final stage. The shipped image ends up smaller, starts faster, and has less attack surface than if the build tools came along for the ride. Next.js's own standalone output already traces and copies exactly the \`node_modules\` the app needs into that output, so there's no separate step required to assemble a production-only dependency set. Order layers so dependency installs are cached (copy package files and install before copying source), exclude what doesn't belong with a \`.dockerignore\` (never \`.env\`, never \`.git\`), and run the final container as a non-root user so a compromised app process has less it can do.
+
+Docker's own \`HEALTHCHECK\` should check **liveness**, not readiness: an orchestrator restarts a container that fails it, so a check that depends on the database reproduces exactly the liveness/readiness mistake the load balancing and scalability topic warns about — a database blip now restarts every container at once. A readiness check (can this instance serve traffic right now?) belongs in the orchestrator's own readiness probe configuration, which removes an instance from traffic without restarting it, not in Docker's \`HEALTHCHECK\`.
+
+## CI vs CD, and what blocks a merge
+
+**Continuous integration**: every change is merged frequently and automatically built and tested, so integration problems surface in minutes, not weeks. **Continuous delivery**: every build that passes CI is releasable — a human still presses the button. **Continuous deployment**: that button press happens automatically too. Either way, the gate before merge is the same: type-check, lint, run the test suite (including integration tests against a real database, not just unit tests), and build — catching a mistake in CI costs minutes; catching it in production costs an incident.
+
+## Secrets and config: from the environment, never the repo
+
+Configuration and secrets come from the environment (or a secrets manager) at deploy or runtime — never hardcoded, never committed, never baked into the image itself. The same built image then gets promoted from staging to production unchanged, with only its configuration differing. A secret that does leak into git history is compromised the moment it's pushed, not just if someone notices; rotating it is the only real fix, and deleting the commit afterward is not one.
+
+## Zero-downtime schema changes: expand, migrate, contract
+
+A rolling deploy means old and new code run side by side for a window — which means the database schema has to work for both versions at once, not just the one being deployed. **Expand**: add the new column or table alongside the old one, without touching it. **Migrate**: have the new code write to both, backfill existing rows, and once everything is populated, switch reads over. **Contract**: only once nothing refers to the old shape anymore — often a release or more later — remove it. Renaming a column in one step, or dropping one the same release a new feature needs it gone, breaks whichever version of the code is still running the old query.
+
+## Migrations in the pipeline: migrate deploy, never migrate dev
+
+\`prisma migrate dev\` is a development command — it can generate new migrations from schema drift, and it can decide to reset the database to resolve drift it can't express as a migration. \`prisma migrate deploy\` only applies migrations that are already committed to the repository, generating nothing new — the only one safe to run against a database with real data, and the one CI/CD pipelines should run as an explicit release step, before the new code takes traffic.
+
+## Why a bad migration is harder to walk back than a bad code deploy
+
+Rolling back a bad *code* deploy is close to free: redeploy the previous build, and the old code runs again exactly as it did before. Rolling back a bad *migration* usually isn't, because a migration doesn't just change what code runs — it can change the data itself. Dropping a column, deleting rows, or backfilling a value destructively isn't undone by redeploying old code; the data the old code expected may simply be gone. Expand/contract exists specifically to make this safe: code rollbacks stay free because the expand step never removes anything the previous version needed, and only the final contract step — which should ship well after confidence in the migration is already high — is allowed to be destructive, by which point rolling back isn't really the plan anyway.
+`.trim(),
+    realWorldExample: `
+A pull request triggers CI: install with a lockfile, type-check, lint, run tests against a real Postgres service container (migrated first), build. Merging to main runs the release:
+\`\`\`bash
+npx prisma migrate deploy   # applies only already-committed migrations — never migrate dev
+npm run build
+./deploy.sh
+./smoke-test.sh || ./rollback.sh
+\`\`\`
+If the smoke test fails, \`rollback.sh\` redeploys the previous build — instantly safe, *because* the migration that already ran was written expand-first: nothing the previous code needed was removed.
+
+**The expand/contract "migrate" step, in application code**, renaming \`orders.total\` to \`orders.amount\` across a rollout: both columns exist, and the code writes both while some instances are still running code that reads the old one:
+\`\`\`ts
+await db.order.update({
+  where: { id, userId },
+  data: { total: amountCents, amount: amountCents }, // write both during the transition
+});
+\`\`\`
+Only once every instance runs code that reads \`amount\` does a later release switch reads over, and a release after *that* drops \`total\` — the destructive step, by which point nothing needs it anymore.
+`.trim(),
+    codeExample: `
+# ---- build: npm ci installs ALL dependencies, including devDependencies — prisma generate
+# runs from a postinstall hook, and prisma itself is a devDependency, so --omit=dev would
+# break it here. ----
+FROM node:22-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+RUN npx prisma generate && npm run build
+
+# ---- runtime: Next.js's standalone output already traced and copied exactly the node_modules
+# it needs — there's no separate dependency-install step, or node_modules copy, required here. ----
+FROM node:22-slim AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+# Prisma's query engine links against OpenSSL, which the slim base image doesn't include.
+RUN apt-get update && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
+RUN addgroup --system app && adduser --system --ingroup app app
+COPY --from=build /app/.next/standalone ./
+COPY --from=build /app/.next/static ./.next/static
+COPY --from=build /app/public ./public
+USER app
+EXPOSE 3000
+# Liveness only: "is this process responding at all?" A database-dependent check here would
+# make the orchestrator restart every container on a single database blip — the exact
+# liveness/readiness mistake the scalability topic warns about. The DB-dependent readiness
+# check belongs in the orchestrator's own readiness probe, never in Docker's HEALTHCHECK.
+HEALTHCHECK --interval=30s --timeout=3s CMD node -e "fetch('http://localhost:3000/api/health/live').then(r=>{if(!r.ok)process.exit(1)})"
+CMD ["node", "server.js"]
+`.trim(),
+    codeLanguage: "BASH",
+    commonMistakes: `
+- **Running \`prisma migrate dev\` (or any migration-generating command) against a database with real data.** It can decide to reset the database to resolve drift it can't express as a migration.
+- **Renaming or dropping a column in the same release that needs the new shape.** A rolling deploy means old code is still querying the old shape while new code expects the new one.
+- **Baking secrets or environment-specific config into a container image.** Anyone who can pull the image can read them, and the same image can no longer be promoted unchanged across environments.
+- **Skipping the lockfile in CI.** Different dependency versions between CI and anyone's local run undermines the entire point of running tests before merging.
+- **Treating a migration rollback like a code rollback.** Redeploying old code doesn't restore a column that already got dropped or data that already got deleted.
+- **Putting build-only tooling (the Prisma CLI's dev dependencies, a compiler) in the final runtime image.** It bloats the image and expands what an attacker who compromises the container can do.
+- **No smoke test or health check gating a deploy.** A release that's actually broken takes real traffic before anyone notices, instead of being caught and rolled back automatically.
+`.trim(),
+  },
+};
+
+const securityTopic: SeedTopic = {
+  slug: "security",
+  title: "Backend security",
+  description: "Injection, XSS, CSRF, SSRF, secrets and least privilege.",
+  prerequisiteSlugs: ["auth"],
+  lesson: {
+    slug: "essentials",
+    title: "Backend security: essentials",
+    level: "ADVANCED",
+    estimatedMinutes: 22,
+    summary:
+      "Most backend vulnerabilities are the same shape: trusting something that crossed a boundary — a query built from user input, an id taken at face value, a URL the server is told to fetch — without the one check that would have caught it.",
+    content: `
+- **SQL injection**: never concatenate input into SQL; use parameterized queries (Prisma does this by default; be careful with raw queries).
+- **XSS**: encode output for its context; React escapes by default, so avoid injecting raw HTML. Add a Content Security Policy.
+- **CSRF**: SameSite cookies plus CSRF tokens or origin checks for cookie-authenticated state changes.
+- **SSRF**: do not let users make your server fetch arbitrary URLs; allowlist destinations and block internal address ranges.
+- **Secrets**: keep them out of git, rotate on exposure, and grant each service the least privilege it needs.
+`.trim(),
+    explanation: `
+## SQL injection: parameterized queries, and how Prisma can still reintroduce it
+
+SQL injection happens when user input is concatenated directly into a query's text, letting an attacker's input change the query's *structure*, not just its values. The fix is to never build SQL as a string from untrusted input: parameterized queries (or an ORM's normal query builder) send the values separately from the SQL text, so a value can never become a new clause. Prisma's ordinary methods (\`findMany\`, \`create\`, and so on) are parameterized by default, and so is its tagged-template \`$queryRaw\` — but \`$queryRawUnsafe\`, or any raw SQL built by string interpolation, reintroduces exactly the same vulnerability Prisma otherwise protects against. The one thing that genuinely can't be parameterized — a column name used for dynamic sorting, say — has to be validated against a fixed whitelist instead (the pagination topic covers this for sort fields specifically).
+
+## IDOR: the vulnerability this entire curriculum has been preventing
+
+Insecure Direct Object Reference — accepting an id from the request and looking the row up by that id alone, with no check that the caller actually owns it — is one of the most common real-world vulnerabilities, and also the one this curriculum has been building the instinct against since the authentication and authorization topic: fold ownership into the query itself (\`WHERE id = $1 AND userId = $2\`), return 404 rather than 403 for someone else's resource so existence itself isn't revealed, and never trust an id's unguessability as a substitute for an actual check. Every lesson since that used \`db.order.findFirst({ where: { id, userId } })\` instead of \`findUnique({ where: { id } })\` was practicing the fix for exactly this vulnerability.
+
+## XSS: encoding output for its context
+
+Cross-site scripting gets an attacker's script to run in another user's browser, usually by storing or reflecting unescaped input into a page. React escapes values by default when you render them in JSX — \`{userInput}\` is always safe — but \`dangerouslySetInnerHTML\` is named that way because it bypasses exactly that protection, rendering a string as raw HTML, scripts included, if it ever carries attacker-controlled content. Sanitize anything that genuinely needs to render as HTML (a rich-text editor's output, say) with a dedicated library, never by just trusting the source, and add a Content Security Policy as a second layer that limits what injected script could do even if some output slipped through unescaped.
+
+## CSRF: SameSite cookies help, but aren't the whole story
+
+Cross-site request forgery tricks a logged-in user's browser into sending a state-changing request to your site, with their cookies attached automatically — the attacker's page never needs to read the response, only to make the browser send the request. \`SameSite=Lax\` or \`Strict\` cookies close off a large share of this, but have specific, real gaps worth knowing precisely, not just a vague caveat:
+
+- \`SameSite=Lax\` (the modern default for a cookie that doesn't set the attribute explicitly) still attaches cookies to a **top-level GET navigation** — clicking a link, or an attacker's page redirecting the browser to your site — even though it blocks them on a cross-site POST. This is exactly why a GET must never change state: under \`Lax\`, a state-changing GET is still forgeable.
+- \`SameSite\` is defined by **site** (the registrable domain — roughly the effective TLD plus one label), not **origin** (scheme, host and port together). Two different subdomains of the same site — \`a.example.com\` and \`b.example.com\` — are *same-site* to each other, so a vulnerability that lets an attacker run code on one subdomain can still forge a request against a cookie-protected endpoint on the other, with \`SameSite\` offering no protection between them at all.
+- Not every client enforces \`SameSite\` the same way — older browsers predate it entirely, and a cookie's effective default can vary by browser and version.
+
+A CSRF token (a value the page must read and echo back, which a forged cross-site request can't do) or an Origin/Referer check on state-changing requests closes these gaps, independent of what any particular browser's cookie policy happens to enforce. None of this applies to APIs authenticated with a bearer token sent in a header instead of a cookie — there's nothing for the browser to attach automatically, so CSRF isn't the same threat there.
+
+## SSRF: letting the server fetch a URL you don't control
+
+Any feature where the server fetches a URL supplied by the user — "import from this link," "fetch this image" — hands the request-maker's network position to whoever controls that URL. Server-side request forgery abuses this to reach internal services, cloud metadata endpoints, or anything else the server can reach but the public internet can't. Mitigate with an allowlist of destinations, resolving DNS and rejecting private/loopback/link-local address ranges (re-checked *after* any redirect, since a redirect can point somewhere the original URL didn't), restricting the allowed protocols, and running the fetch itself with minimal network access.
+
+## CORS is a browser-enforced read restriction, not server-side access control
+
+CORS governs what a browser allows a *different origin's* JavaScript to do with a response — not, in general, what reaches the server. For a "simple" request (a plain GET, or a POST with a basic form content type and no custom headers), the browser sends it and the server processes it exactly as normal; CORS only decides afterward whether the calling page's own script is allowed to *read* the response, hiding it from that script without un-sending the request. For a "non-simple" request — a JSON body (\`Content-Type: application/json\`), a custom header, or a method like PUT/DELETE/PATCH, which covers most real JSON APIs — the browser first sends a preflight \`OPTIONS\` request, and if the server's preflight response doesn't permit the actual method, headers and origin, the browser never sends the real request at all. So CORS *can*, in that specific case, stop a cross-origin browser request from ever reaching the server — but it still isn't access control: a non-browser client (curl, a server-to-server call, Postman) never performs a preflight and never consults a CORS header at all, so CORS stops nothing for any caller that isn't a browser enforcing a policy on itself. The actual access control — authentication, and folding ownership into every query — has to happen on the server regardless of what CORS headers are set.
+
+## Least privilege, and secrets as liabilities
+
+Grant each service, database user, and credential only the permission it actually needs — a database role that can't \`DROP TABLE\`, an API key scoped to one action, a container that doesn't run as root — so a single bug or leaked credential has a limited blast radius instead of an unlimited one. Treat any secret that reaches a public place (committed to git, logged, pasted somewhere public) as compromised the instant it's exposed, not just if misuse is later detected: rotate it immediately, check for signs it was already used, and only then worry about scrubbing the exposure itself.
+`.trim(),
+    realWorldExample: `
+A "download invoice" endpoint originally looked the invoice up by id alone:
+\`\`\`ts
+// vulnerable: any authenticated user can read any invoice by guessing or incrementing the id
+const invoice = await db.invoice.findUnique({ where: { id: invoiceId } });
+\`\`\`
+Folding ownership into the query — the authentication and authorization topic's fix for exactly this — closes it without a separate check to forget:
+\`\`\`ts
+const invoice = await db.invoice.findFirst({ where: { id: invoiceId, userId } });
+if (!invoice) return NextResponse.json({ error: "Not found" }, { status: 404 }); // not 403 — don't confirm it exists
+\`\`\`
+
+**A sort parameter that looks safe until someone builds the query by hand:**
+\`\`\`ts
+// vulnerable: sortField comes straight from the query string into raw SQL
+const rows = await db.$queryRawUnsafe(\`SELECT * FROM invoices ORDER BY \${sortField}\`);
+\`\`\`
+A fixed map from each allowed value to its own \`Prisma.sql\` fragment closes the injection without ever letting anything user-supplied reach raw SQL text, even after validation:
+\`\`\`ts
+const SORT_FRAGMENTS = {
+  createdAt: Prisma.sql\`"createdAt" DESC\`,
+  amountCents: Prisma.sql\`"amountCents" DESC\`,
+} as const;
+const sort = z.enum(["createdAt", "amountCents"]).catch("createdAt").parse(sortParam);
+const rows = await db.$queryRaw\`SELECT * FROM invoices ORDER BY \${SORT_FRAGMENTS[sort]}\`;
+\`\`\`
+
+**What CORS does and doesn't do.** A plain GET to \`/api/invoices/42\` from a different user's browser session is a "simple" request — the browser sends it, the server processes it, and \`Access-Control-Allow-Origin: https://app.example.com\` only decides afterward whether a *different* site's own JavaScript would be allowed to *read* the response. A JSON POST to the same endpoint from another origin is "non-simple" — the browser preflights it first, and a mismatched origin means the browser never sends the real request at all. Either way, curl, Postman, or any server-to-server call was never subject to CORS in the first place. The actual access control still has to be the \`userId\` check above; CORS was never going to provide it.
+`.trim(),
+    codeExample: `
+// app/api/invoices/[id]/route.ts
+// A route file may only export HTTP method handlers (GET, POST, ...) — a differently-named
+// export like listInvoices would break the build, which is why the list endpoint below lives
+// in its own route file instead of a second export here.
+import { NextResponse } from "next/server";
+
+// GET /api/invoices/[id] — ownership folded into the lookup; IDOR has nothing to exploit here.
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const userId = await requireUserId(req);
+
+  const invoice = await db.invoice.findFirst({ where: { id, userId } });
+  if (!invoice) return NextResponse.json({ error: "Not found" }, { status: 404 }); // not 403
+  return NextResponse.json(invoice);
+}
+
+// app/api/invoices/route.ts
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { Prisma } from "@prisma/client";
+
+// A fixed map from each allowed sort value to its own SQL fragment — not a validated string
+// handed to Prisma.raw. Nothing user-supplied ever reaches raw SQL text, not even after
+// validation, because the only values that can appear here are the ones written on this map.
+const SORT_FRAGMENTS = {
+  createdAt: Prisma.sql\`"createdAt" DESC\`,
+  amountCents: Prisma.sql\`"amountCents" DESC\`,
+} as const;
+const listInvoicesSchema = z.object({ sort: z.enum(["createdAt", "amountCents"]).default("createdAt") });
+
+// GET /api/invoices?sort=createdAt
+export async function GET(req: Request) {
+  const userId = await requireUserId(req);
+  const { searchParams } = new URL(req.url);
+  const parsed = listInvoicesSchema.safeParse({ sort: searchParams.get("sort") ?? undefined });
+  if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+
+  const rows = await db.$queryRaw\`
+    SELECT * FROM invoices WHERE "userId" = \${userId} ORDER BY \${SORT_FRAGMENTS[parsed.data.sort]}
+  \`;
+  return NextResponse.json(rows);
+}
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Building SQL by concatenating or interpolating user input**, including via Prisma's \`$queryRawUnsafe\` or \`Prisma.raw\` on an unvalidated value. The exact mechanism changes; the vulnerability doesn't.
+- **Looking a resource up by id alone and trusting that an id is unguessable instead of actually checking ownership.** IDOR — an id being hard to guess is not a security control.
+- **Returning 403 instead of 404 for someone else's resource.** A 403 confirms the resource exists; a 404 doesn't.
+- **Rendering untrusted content with \`dangerouslySetInnerHTML\` (or any raw-HTML sink) without sanitizing it first.** React's default escaping doesn't apply once you've explicitly opted out of it.
+- **Changing state on a GET request, or treating \`SameSite\` alone as a complete CSRF defense.** \`Lax\` still attaches cookies to a top-level GET navigation, and \`SameSite\` is scoped to *site*, not *origin* — sibling subdomains are unprotected from each other. Add a token or an origin check too.
+- **Letting a server fetch an arbitrary user-supplied URL with no allowlist or address-range check.** SSRF — and a check before the first request doesn't cover where a redirect leads.
+- **Treating a permissive CORS header as if it were a general access-control mechanism.** It can stop a non-simple cross-origin browser request (JSON body, custom headers) at the preflight — but a simple request still reaches the server either way, and any non-browser client never consults CORS at all.
+- **Hashing passwords with a fast, general-purpose hash (SHA-256, MD5) instead of a slow password-hashing algorithm.** Covered in depth — bcrypt, Argon2id, and why speed is the wrong property to optimize for here — in the authentication and authorization topic.
+`.trim(),
+  },
+};
+
+const systemDesignTopic: SeedTopic = {
+  slug: "system-design",
+  title: "System design fundamentals",
+  description: "Requirements, estimation, trade-offs and the building blocks of large systems.",
+  prerequisiteSlugs: ["scalability", "observability"],
+  lesson: {
+    slug: "essentials",
+    title: "System design fundamentals: essentials",
+    level: "ADVANCED",
+    estimatedMinutes: 25,
+    summary:
+      "A system-design answer isn't a lucky guess at the right architecture — it's a structured walk from requirements to a design to its weakest point, in that order, reusing the patterns (caching, queues, replicas, idempotency) the rest of this curriculum already built rather than inventing new ones.",
+    content: `
+A good system-design answer is a structured conversation:
+
+1. Clarify functional and non-functional requirements (scale, latency, consistency, availability).
+2. Estimate load: requests per second, storage growth, read/write ratio.
+3. Sketch the high-level design: clients, load balancer, stateless services, databases, caches, queues.
+4. Dive into the hardest parts: data model, hot spots, failure modes.
+5. Discuss trade-offs explicitly — consistency vs availability during partitions, cost vs latency, simplicity vs flexibility.
+
+Know the vocabulary: SLI/SLO/SLA, replication vs sharding, CAP, idempotency, back-pressure.
+`.trim(),
+    explanation: `
+## The structure: requirements → estimates → API → data model → bottlenecks → trade-offs
+
+A system-design answer is a structured conversation, not a monologue about a remembered architecture diagram. Work through, roughly in order: clarify what's actually being asked for; estimate the load; sketch the API and the data it implies; find where that design would actually struggle; and discuss the trade-offs the design makes, explicitly, rather than presenting one option as if it had none. Skipping straight to a diagram tends to produce a design for a system that was never actually specified.
+
+## Functional vs non-functional requirements
+
+Functional requirements are what the system does: a user can shorten a URL, follow a short link, see analytics. Non-functional requirements are the constraints that shape *how*: how many requests per second, how much latency is acceptable, how consistent does it need to be, what happens during a partition, how available does it need to be. Two systems with identical functional requirements can need completely different architectures once the non-functional ones differ — ask about scale and consistency needs before designing anything.
+
+## Back-of-the-envelope estimates, done correctly
+
+Rough numbers decide which problems actually matter. 10 million daily active users, each making 20 requests a day, is 200 million requests per day; divided by roughly 86,400 seconds in a day, that's a little over 2,300 requests per second on average — and real traffic isn't flat, so peak load is usually several times the average, not the same number. Getting the arithmetic right matters more than the specific numbers: an estimate that's internally inconsistent undermines everything built on it, while a rough-but-correct one tells you right away whether one database is plausible or whether caching, replicas, or more are already necessary before writing a line of code.
+
+## Sketching the API and data model
+
+A handful of endpoints and the tables or documents behind them usually says more than a paragraph of prose — what does the client actually call, and what does the data look like at rest? This is also where earlier topics' patterns show up concretely: pagination's cursor shape for a list endpoint, idempotency keys on anything that creates a resource, ownership folded into every lookup from the start rather than bolted on later.
+
+## Finding the bottleneck, and reusing patterns instead of inventing them
+
+Every design has a part that will struggle first under real load — a hot row, a fan-out write, a query that gets slower as a table grows. Naming it, and explaining the fix, is the part of the conversation that actually differentiates answers — and the fixes themselves are rarely novel: caching absorbs read load, a queue absorbs write bursts and decouples producers from slow consumers, a read replica spreads read traffic (with its lag handled explicitly), an idempotency key makes a retried write safe, an index turns a table scan into a lookup. Reaching for these familiar tools, applied to the specific bottleneck just identified, reads as stronger than inventing something new mid-conversation.
+
+## Trade-offs, stated explicitly, not glossed over
+
+Every real design choice trades something for something else: consistency for availability during a partition (CAP), latency for durability (how many replicas must confirm a write before it's acknowledged), simplicity for flexibility (one big table vs. several normalized ones), cost for performance (a cache vs. recomputing). Naming the trade-off explicitly — "this means a reader might see stale data for up to N seconds, which is acceptable here because..." — is a stronger answer than presenting the choice as though it had no downside.
+
+## The vocabulary interviewers expect
+
+SLI/SLO/SLA (what's measured, the target for it, and the contractual consequence of missing it); replication vs. sharding (copying the same data for availability and read scaling, versus splitting different data across nodes for write scaling); CAP (consistency vs. availability, only during an actual partition); back-pressure (a slow consumer making a producer slow down or buffer, rather than being overwhelmed). Using the right word for a concept signals an actual mental model, not a memorized diagram.
+`.trim(),
+    realWorldExample: `
+A URL shortener: users submit a URL and get a short code back; anyone following the code is redirected, with low latency, at a much higher read volume than writes.
+
+**Requirements.** Functional: create a short link, optionally with a custom alias; follow it and get redirected; see click counts. Non-functional: reads vastly outnumber writes, redirects need to be fast, and losing a few minutes of click analytics during an incident is fine — strong consistency on clicks isn't worth the cost here.
+
+**Estimate.** 100 million clicks a day is roughly 1,150 per second on average (100,000,000 ÷ 86,400), several times that at peak — comfortably cacheable, nowhere near needing to shard reads across multiple databases yet.
+
+**API and data model.** \`POST /links { url, alias? }\` → \`{ code }\`; \`GET /{code}\` → a redirect. The data model is almost exactly one table:
+\`\`\`sql
+CREATE TABLE links (
+  id                bigserial PRIMARY KEY,
+  code              text NOT NULL UNIQUE,
+  "destinationUrl"  text NOT NULL,
+  "ownerId"         text NOT NULL,
+  "createdAt"       timestamptz NOT NULL DEFAULT now()
+);
+-- "My links, newest first" — the pagination topic's leftmost-prefix composite index.
+CREATE INDEX links_ownerId_createdAt_idx ON links ("ownerId", "createdAt" DESC);
+\`\`\`
+Every one of this curriculum's earlier lessons about folding ownership into a query applies the moment "see my own links" becomes a requirement.
+
+**Bottleneck.** Reads, not writes — every redirect is a read. The pagination topic's composite-index reasoning applies directly to "list my links, newest first"; the caching topic's cache-aside pattern applies directly to "look up a code's destination," since a code's destination essentially never changes once created; the rate-limiting topic applies directly to "stop one client from creating links faster than legitimate use would."
+
+**Trade-off: exact clicks vs a fast redirect.** Recording a click is a write on every single read-path request, which would make the redirect's hot path exactly as slow as the one thing meant to be fast. Decoupling it — publish a click event onto a queue (the background jobs topic) and aggregate counts asynchronously — trades exact, immediate click counts for a redirect that stays fast, which is the right trade for this feature specifically: nobody is making a financial decision based on a click count being accurate to the second.
+
+**Trade-off: 301 vs 302.** A 301 (permanent) redirect gets cached by the browser itself, so a repeat visit to the same short link never even reaches the server again — faster for the user, but every one of those repeat clicks is invisible to click analytics and to a link the owner later wants to repoint. A 302 (temporary) keeps every click passing through the service, at the cost of one more request each time.
+`.trim(),
+    codeExample: `
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { Prisma } from "@prisma/client";
+
+const createLinkSchema = z.object({
+  url: z.string().url().refine((u) => ["http:", "https:"].includes(new URL(u).protocol), {
+    message: "Only http and https URLs are allowed",
+  }),
+});
+
+function generateShortCode() {
+  return Math.random().toString(36).slice(2, 8); // illustrative — a real generator wants more entropy
+}
+
+const MAX_CODE_ATTEMPTS = 5;
+
+// POST /api/links — ownerId comes from the session, never the request body.
+export async function POST(req: Request) {
+  const ownerId = await requireUserId(req);
+  const parsed = createLinkSchema.safeParse(await req.json());
+  if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+
+  for (let attempt = 0; attempt < MAX_CODE_ATTEMPTS; attempt++) {
+    try {
+      const link = await db.link.create({
+        data: { code: generateShortCode(), destinationUrl: parsed.data.url, ownerId },
+      });
+      return NextResponse.json({ code: link.code }, { status: 201 });
+    } catch (err) {
+      // A random code colliding with an existing one is rare but expected eventually — retry
+      // with a fresh code a bounded number of times rather than failing the whole request.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") continue;
+      throw err;
+    }
+  }
+  return NextResponse.json({ error: "Could not generate a unique code, try again" }, { status: 503 });
+}
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Jumping straight to a detailed architecture without clarifying requirements first.** A design for 1,000 users and one for 100 million users look nothing alike, and guessing which one was asked for wastes the rest of the conversation.
+- **Back-of-envelope arithmetic that doesn't actually check out.** The specific numbers matter less than whether they're internally consistent — bad arithmetic undermines every conclusion built on it.
+- **Treating peak load as equal to the average.** Real traffic has peaks several times the average, and a design sized only for the average falls over exactly when it matters.
+- **Reaching for sharding, a new database technology, or a novel algorithm before exhausting the familiar tools.** Caching, queues, indexes and replicas solve most real bottlenecks and are far better understood than something invented on the spot.
+- **Presenting a design choice as if it had no downside.** Every real trade-off costs something; naming the cost is what makes an answer credible instead of a sales pitch for one option.
+- **Skipping the data model and jumping to infrastructure.** The hardest and most revealing part of most designs is what the data actually looks like and how it's queried, not which cloud service hosts it.
+- **Using "idempotency," "replication," "sharding" and similar words as decoration instead of precisely.** This curriculum's own topics on each cover exactly what the words mean and when each applies.
+`.trim(),
+  },
+};
+
 const topics: SeedTopic[] = [
   httpTopic,
   restTopic,
@@ -2489,45 +3149,11 @@ const topics: SeedTopic[] = [
   webhooksTopic,
   concurrencyTopic,
   isolationLockingTopic,
-  t("observability", "Logging, monitoring, and error handling", "Structured logs, metrics, traces, alerting and safe error responses.", `
-- **Logs** explain individual events; **metrics** show trends and trigger alerts; **traces** follow one request across services.
-- Log structured JSON with a request/correlation id; never log passwords, tokens or full card numbers.
-- Watch the golden signals: latency, traffic, errors, saturation.
-- Clients get a generic error and a request id; the logs get the details.
-- Alert on symptoms users feel (error rate, latency SLOs), not on every internal blip.
-`),
-  t("scalability", "Load balancing and scalability", "Horizontal scaling, stateless services, health checks and read replicas.", `
-- **Vertical** scaling buys a bigger machine; **horizontal** scaling adds machines behind a load balancer.
-- Horizontal scaling requires **stateless** app servers: sessions, uploads and caches live in shared stores.
-- Load balancers distribute traffic (round robin, least connections) and use **health checks** to stop routing to unhealthy instances.
-- Databases scale reads with replicas (beware replication lag), and writes with partitioning/sharding — a much bigger step.
-- Measure first: find the actual bottleneck before scaling anything.
-`),
-  t("devops", "Docker, CI/CD, and cloud deployment", "Containers, pipelines, configuration and safe database migrations.", `
-- Containers package an app with its dependencies and share the host kernel; VMs virtualize a whole machine.
-- Multi-stage Dockerfiles build in one stage and copy only the output into a small runtime image; run as a non-root user.
-- CI runs type checks, lint, tests and builds on every change; CD deploys passing builds automatically.
-- Configuration and secrets come from the environment, never baked into images or committed to git.
-- Run migrations as an explicit release step, and make schema changes backward compatible (**expand → migrate → contract**) so old and new code can run side by side.
-`),
-  t("security", "Backend security", "Injection, XSS, CSRF, SSRF, secrets and least privilege.", `
-- **SQL injection**: never concatenate input into SQL; use parameterized queries (Prisma does this by default; be careful with raw queries).
-- **XSS**: encode output for its context; React escapes by default, so avoid injecting raw HTML. Add a Content Security Policy.
-- **CSRF**: SameSite cookies plus CSRF tokens or origin checks for cookie-authenticated state changes.
-- **SSRF**: do not let users make your server fetch arbitrary URLs; allowlist destinations and block internal address ranges.
-- **Secrets**: keep them out of git, rotate on exposure, and grant each service the least privilege it needs.
-`),
-  t("system-design", "System design fundamentals", "Requirements, estimation, trade-offs and the building blocks of large systems.", `
-A good system-design answer is a structured conversation:
-
-1. Clarify functional and non-functional requirements (scale, latency, consistency, availability).
-2. Estimate load: requests per second, storage growth, read/write ratio.
-3. Sketch the high-level design: clients, load balancer, stateless services, databases, caches, queues.
-4. Dive into the hardest parts: data model, hot spots, failure modes.
-5. Discuss trade-offs explicitly — consistency vs availability during partitions, cost vs latency, simplicity vs flexibility.
-
-Know the vocabulary: SLI/SLO/SLA, replication vs sharding, CAP, idempotency, back-pressure.
-`),
+  observabilityTopic,
+  scalabilityTopic,
+  devopsTopic,
+  securityTopic,
+  systemDesignTopic,
 ];
 
 export const curriculum = { track: tracks[0]!, topics };

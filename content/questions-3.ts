@@ -275,6 +275,11 @@ const observability: SeedQuestion[] = [
     ["correlation id", "request id", "trace id", "correlation-id"],
     "A correlation (or request/trace) id ties together all logs and spans for one request across services. Propagate it via a header such as X-Request-Id or the W3C traceparent header.",
     { tags: ["logging", "tracing"] }),
+
+  mc("observability", "obs-009", I, "A metric records request duration labeled with the raw request path, e.g. `{ route: \"/orders/42\" }`. What goes wrong as the app runs?",
+    ["Every distinct path becomes its own time series, so the metrics backend's storage and cost grow without bound as new resource ids appear", "Nothing — metrics backends are designed for unlimited label values", "The metric silently stops recording after too many distinct labels", "It only affects log storage, not metrics"], 0,
+    "This is a cardinality explosion: a raw id or full URL used as a label multiplies the number of distinct time series the backend has to store and query. Label by the route's template (/orders/:id) instead, and put the specific id in a log line or trace span, where unbounded values belong.",
+    { tags: ["metrics", "cardinality"] }),
   sc("observability", "obs-007", I, "Your API's p99 latency jumped from 300 ms to 4 seconds this afternoon, but averages look fine. How do you investigate?",
     "Segment the slow requests (route, tenant, instance), use traces to find the slow span, check dependencies and saturation (DB, pool, CPU, GC), correlate with changes, then fix and add alerts.",
     "A p99 spike with a normal average means a minority of requests are very slow. I would break latency down by route, instance and customer to find what the slow requests have in common. Distributed traces for slow requests show which span grew: a database query, an external API call, or waiting for a connection from the pool. I would check saturation signals — database CPU and locks, connection pool wait time, event-loop lag, garbage collection pauses — and correlate the start time with deploys, traffic spikes, cron jobs or a dependency's status page. Once found, I fix the cause (an index, a timeout, pool sizing) and add an SLO-based alert on p99 so it pages before customers notice.",
