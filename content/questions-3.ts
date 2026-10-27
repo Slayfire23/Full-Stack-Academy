@@ -97,6 +97,11 @@ const webhooks: SeedQuestion[] = [
     ],
     "Treat webhooks as an untrusted, at-least-once, unordered stream and you will cover what interviewers are listening for.",
     { tags: ["payment-processing", "security"] }),
+
+  fc("webhooks", "hook-009", I, "Node's `crypto.timingSafeEqual` is used to compare a webhook's expected and received signatures. What happens if an attacker sends a signature header of the wrong length, and how do you guard against it?",
+    "timingSafeEqual throws (rather than returning false) when its two buffers aren't the same length. An uncaught throw can crash the handler, or worse, a surrounding try/catch that treats any error as \"verified\" turns the throw into a bypass. Compare the lengths first and only call timingSafeEqual once they match.",
+    "An HMAC-SHA256 digest is always the same fixed length, so a header of a different length is already proof of forgery — rejecting it on the length check alone, before timingSafeEqual ever runs, is both correct and avoids the exception entirely.",
+    { tags: ["security", "hmac"] }),
 ];
 
 // ─────────────── 15. Idempotency ───────────────
@@ -237,6 +242,11 @@ const isolation: SeedQuestion[] = [
     ],
     "Deadlocks are a lock-ordering problem; retries are a safety net, not the fix.",
     { tags: ["deadlocks", "payment-processing"] }),
+
+  fc("isolation-locking", "iso-009", A, "A nightly job must never run twice concurrently, but there's no database row that represents \"is the job running.\" What PostgreSQL locking primitive fits this, and why is the session-level form risky to use through Prisma or a connection pooler?",
+    "An advisory lock (pg_try_advisory_lock, or the transaction-scoped pg_try_advisory_xact_lock) locks an arbitrary application-chosen key instead of a row, so it works even when there's nothing to SELECT. The session-level form ties the lock to the underlying connection; going through a pool, the lock and its later unlock aren't guaranteed to land on the same connection, so the unlock can silently do nothing and leak the lock — a transaction-mode pooler (PgBouncer, Supabase's transaction pooler) makes this worse by handing out a different connection per transaction.",
+    "pg_try_advisory_xact_lock sidesteps the pooling problem entirely: it's acquired and released on whichever single connection the current transaction happens to be pinned to, automatically, at commit or rollback — no separate unlock call to risk running on the wrong connection. It only suits a short, DB-only critical section, though, since the transaction (and the lock with it) shouldn't be held open across a slow network call; a long-running job needs a lease row instead.",
+    { tags: ["postgres", "locking"] }),
 ];
 
 // ─────────────── 18. Logging, monitoring, and error handling ───────────────

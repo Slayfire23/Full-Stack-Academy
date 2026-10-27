@@ -1842,6 +1842,635 @@ async function runWithRetry(job: { id: string; kind: string; payload: unknown; a
   },
 };
 
+const idempotencyTopic: SeedTopic = {
+  slug: "idempotency",
+  title: "Idempotency",
+  description: "Designing operations that are safe to retry.",
+  prerequisiteSlugs: ["postgres", "prisma"],
+  lesson: {
+    slug: "essentials",
+    title: "Idempotency: essentials",
+    level: "INTERMEDIATE",
+    estimatedMinutes: 18,
+    summary:
+      "Idempotent means doing it twice is the same as doing it once — but that guarantee has to live in storage (a unique constraint, an idempotency key record), not in the client's good behavior, because the client genuinely cannot tell whether a timed-out request already succeeded.",
+    content: `
+An operation is idempotent when doing it twice has the same effect as doing it once. Networks time out, clients retry, and queues redeliver — so side-effecting operations must be safe to repeat.
+
+- **Idempotency keys**: the client sends a unique key (e.g. \`Idempotency-Key\` header); the server stores key + request fingerprint + result, and returns the stored result on retry.
+- Reject reuse of a key with a different payload.
+- Natural idempotency: unique constraints and upserts ("insert if not exists") make duplicates impossible at the database level.
+- Make the key record and the side effect commit together, or handle the "in progress" state explicitly.
+`.trim(),
+    explanation: `
+## Why idempotency matters: the client can't tell what happened
+
+A client that sent a POST and then got a timeout, a dropped connection, or a 502 from a proxy in the middle has no way to know whether the request reached the server and succeeded, failed outright, or is still being processed. The only safe thing it can do is retry — which means every side-effecting operation a client might retry has to be safe to run more than once. "Idempotent" doesn't mean "read-only"; it means doing it N times has the same observable effect as doing it once.
+
+## Idempotency keys: store the request's fingerprint and the result
+
+The client generates a unique key per logical operation (not per HTTP attempt) — typically a UUID — and sends it, commonly as an \`Idempotency-Key\` header. The server's first job on seeing a new key is to atomically record it, along with a fingerprint of the request (a hash of its meaningful fields) and, once known, the result. A retry with the same key doesn't repeat the side effect; it looks up the stored result and returns it. Keys are scoped to the caller (see below) and usually expire after a retention window — long enough to cover realistic retries, not forever.
+
+## The concurrent-duplicate problem: a retry that arrives while the first is still running
+
+A client's retry doesn't always arrive after the first attempt has finished — a slow request and an impatient retry can be in flight at the same time. If the key record is only written *after* the side effect completes, both requests can see "no record yet," both proceed, and the side effect runs twice. The fix is to insert the key record *before* doing the side effect, under a unique constraint, with a status like \`IN_PROGRESS\`: the first request's insert succeeds and it proceeds; the second request's insert hits the constraint, finds the row already there, and responds with "still processing, retry shortly" instead of racing ahead. Only once the real operation finishes does the row update to \`COMPLETED\` with the response and the original status code to return on future retries.
+
+That leaves one gap: what if the first attempt never finishes at all — a crash, a worker killed mid-request — and leaves the row stuck \`IN_PROGRESS\` forever? Two things close it. If the side effect itself throws, delete the row (or mark it \`FAILED\`) before letting that error propagate, so the *next* retry starts clean instead of piling up behind a row that will never reach \`COMPLETED\`. And separately, treat an \`IN_PROGRESS\` row older than a short timeout (a minute is plenty for an HTTP request) as abandoned, and let a new attempt take it over rather than block on it indefinitely. Taking it over is safe even in the worst case — the original attempt having actually reached the provider and then crashed before recording it — because the charge itself is made with the *same* idempotency key passed on to the provider; the provider's own dedupe, not this row, is the thing that actually prevents a double charge.
+
+## Rejecting key reuse with a different body
+
+A stored key only means "this exact operation has already been attempted" if the server also checks that the retry's request actually matches what the key was first used for. Comparing the stored fingerprint against the incoming request catches a client bug (or a deliberate attempt) to reuse a key for a different operation — reject it outright rather than either replaying the wrong stored result or quietly performing the new, different request under an old key.
+
+## Natural idempotency via constraints — treat a duplicate as success, not failure
+
+Sometimes a separate key-tracking table isn't even needed: if the operation already has a natural unique identity — one shipment per order, one processed event per webhook event id — a UNIQUE constraint on that identity makes a second attempt fail to insert rather than insert a duplicate. The crucial part is how the caller treats that failure: a unique-constraint violation here means "this already happened," which is success, not an error to retry — catching it (Prisma's \`P2002\`) and returning the existing row is the correct response, never re-raising it as a retryable failure, which would just loop forever re-attempting something that already succeeded.
+
+## Scope keys to the caller
+
+An idempotency key is only unique *within one caller's own operations* — the uniqueness constraint should be on \`(userId, key)\`, not \`key\` alone, so one user's key choice can never collide with (or be replayed against) another user's request.
+`.trim(),
+    realWorldExample: `
+A checkout endpoint must survive a double-click or a client retry without charging the customer twice.
+
+**The record comes first, under a unique constraint on \`(userId, key)\` — before any charge happens:**
+\`\`\`sql
+CREATE TABLE idempotency_keys (
+  "userId"      text NOT NULL,
+  key           text NOT NULL,
+  "requestHash" text NOT NULL,
+  status        text NOT NULL, -- 'IN_PROGRESS' | 'COMPLETED'
+  "statusCode"  integer, -- the original response's status, replayed as-is (201, not always 200)
+  response      jsonb,
+  "createdAt"   timestamptz NOT NULL DEFAULT now(), -- also used to detect an abandoned IN_PROGRESS row
+  PRIMARY KEY ("userId", key)
+);
+\`\`\`
+A concurrent retry's insert fails this primary key immediately — it never gets to start a second charge while the first is still running. A client that reuses the same key with a different checkout body is caught by comparing \`requestHash\`, not by trusting the client.
+`.trim(),
+    codeExample: `
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { Prisma } from "@prisma/client";
+import { createHash } from "node:crypto";
+
+const idempotencyKeySchema = z.string().min(1).max(255); // most providers' own limit — not necessarily a UUID
+const paymentSchema = z.object({ orderId: z.string().min(1) }); // amount is never client-supplied — see below
+
+const ABANDONED_AFTER_MS = 60_000; // generous for one HTTP request; tune to your real p99
+
+function fingerprint(body: unknown) {
+  return createHash("sha256").update(JSON.stringify(body)).digest("hex");
+}
+
+export async function POST(req: Request) {
+  const userId = await requireUserId(req);
+  const keyParsed = idempotencyKeySchema.safeParse(req.headers.get("idempotency-key"));
+  if (!keyParsed.success) return NextResponse.json({ error: "Idempotency-Key header is required (1-255 chars)" }, { status: 400 });
+  const idempotencyKey = keyParsed.data;
+
+  const parsed = paymentSchema.safeParse(await req.json());
+  if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+  const requestHash = fingerprint(parsed.data);
+
+  // The amount charged comes from the order record, scoped to the caller — never from the
+  // request body. A client that could supply its own amount could charge itself one cent.
+  const order = await db.order.findFirst({ where: { id: parsed.data.orderId, userId } });
+  if (!order) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+  try {
+    // Inserted before the charge, status IN_PROGRESS — never record a side effect as done
+    // before it happens, but a concurrent duplicate still has to be caught before it starts.
+    await db.idempotencyKey.create({ data: { userId, key: idempotencyKey, requestHash, status: "IN_PROGRESS" } });
+  } catch (err) {
+    if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002")) throw err;
+
+    // A record already exists for (userId, key). Try to take over an abandoned attempt
+    // atomically: this WHERE only matches a row that's still IN_PROGRESS and older than the
+    // timeout, so it can't steal a key a healthy in-flight request still owns.
+    const takeover = await db.idempotencyKey.updateMany({
+      where: { userId, key: idempotencyKey, requestHash, status: "IN_PROGRESS", createdAt: { lt: new Date(Date.now() - ABANDONED_AFTER_MS) } },
+      data: { createdAt: new Date() }, // reset the clock — this attempt now owns the key
+    });
+
+    if (takeover.count === 0) {
+      const existing = await db.idempotencyKey.findUniqueOrThrow({ where: { userId_key: { userId, key: idempotencyKey } } });
+      if (existing.requestHash !== requestHash) {
+        return NextResponse.json({ error: "Idempotency-Key reused with a different request" }, { status: 409 });
+      }
+      if (existing.status === "COMPLETED") {
+        return NextResponse.json(existing.response, { status: existing.statusCode ?? 200 }); // replay as-is, no re-charge
+      }
+      return NextResponse.json({ error: "Request still processing, retry shortly" }, { status: 409 });
+    }
+    // takeover.count === 1: this request now owns the (previously abandoned) key and proceeds
+    // to charge below. Safe even if the original attempt did reach the provider, because the
+    // charge reuses the SAME idempotencyKey — the provider's own dedupe prevents a double charge.
+  }
+
+  let charge: unknown;
+  try {
+    // The real side effect, with its own idempotency key passed to the provider as a second layer.
+    charge = await chargeCard(order.id, order.amountCents, { idempotencyKey });
+  } catch (err) {
+    // The attempt failed outright — delete the row so a retry starts clean instead of piling
+    // up behind a row that will now never reach COMPLETED.
+    await db.idempotencyKey.delete({ where: { userId_key: { userId, key: idempotencyKey } } });
+    throw err;
+  }
+
+  await db.idempotencyKey.update({
+    where: { userId_key: { userId, key: idempotencyKey } },
+    data: { status: "COMPLETED", statusCode: 201, response: charge },
+  });
+  return NextResponse.json(charge, { status: 201 });
+}
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Writing the key record as "done" before the side effect actually runs.** If the side effect never happens — a crash, the provider is down — a later legitimate retry wrongly replays a "success" that never occurred. Record \`IN_PROGRESS\` first, \`COMPLETED\` only after.
+- **Checking for an existing key with a plain \`SELECT\` before inserting, instead of relying on the \`INSERT\`'s own unique constraint.** That's check-then-act all over again — two concurrent retries can both pass the \`SELECT\` before either inserts.
+- **Not handling a retry that arrives while the first attempt is still \`IN_PROGRESS\`.** Without it, a fast-enough retry can run the side effect concurrently with the original, defeating the whole mechanism.
+- **Leaving a key stuck \`IN_PROGRESS\` forever after the side effect fails, or the process crashes before finishing it.** Delete the row (or mark it \`FAILED\`) on failure so a client can retry, and treat an \`IN_PROGRESS\` row older than a short timeout as abandoned rather than blocking retries indefinitely — a new attempt can safely take it over, because the provider's own idempotency key, not this row, is what actually prevents a double charge if the original attempt somehow still completes.
+- **Accepting a reused key without comparing the request to what it was first used for.** A mismatched body under a known key either replays the wrong result or performs a different operation under false pretenses.
+- **Scoping a key's uniqueness globally instead of per caller.** A constraint on \`key\` alone, not \`(userId, key)\`, lets one user's key collide with another user's operation.
+- **Treating a unique-constraint violation on a naturally idempotent operation as a failure to retry, instead of success.** It means the operation already happened.
+`.trim(),
+  },
+};
+
+const webhooksTopic: SeedTopic = {
+  slug: "webhooks",
+  title: "Webhooks and polling",
+  description: "Push vs pull integration, signature verification and robust receivers.",
+  prerequisiteSlugs: ["idempotency", "jobs-queues"],
+  lesson: {
+    slug: "essentials",
+    title: "Webhooks and polling: essentials",
+    level: "INTERMEDIATE",
+    estimatedMinutes: 20,
+    summary:
+      "A webhook endpoint is a public URL anyone can POST to — every request has to prove it actually came from the provider before anything in the body is trusted, and that proof depends on verifying the exact bytes the provider signed, not a reparsed copy of them.",
+    content: `
+- **Polling** asks repeatedly ("anything new?"); simple but wasteful and delayed. **Webhooks** push events to your endpoint as they happen.
+- Verify every webhook: compute an HMAC over the **raw** request body with the shared secret, compare in constant time, and reject old timestamps to stop replays.
+- Acknowledge fast (2xx), then process asynchronously.
+- Expect duplicates and out-of-order delivery: store processed event ids with a unique constraint and re-fetch current state when order matters.
+- Keep a reconciliation poll as a safety net for missed events.
+`.trim(),
+    explanation: `
+## Push vs pull
+
+**Polling** asks a provider "anything new?" on a schedule — simple, works through any firewall, but wastes requests when nothing changed and delays discovery by up to the polling interval. **Webhooks** flip the direction: the provider pushes an HTTP request to your endpoint the moment something happens — near-real-time, but now your endpoint is a public URL that has to defend itself, and the provider's own delivery guarantees (retries, ordering, uniqueness) become your problem too.
+
+## Verifying a signature: HMAC over the raw body
+
+A webhook request is, from your server's point of view, indistinguishable from anyone else's POST to that URL unless you verify it. Providers sign the request by computing an HMAC (commonly HMAC-SHA256) over the **exact bytes** of the request body using a shared secret, and send that signature in a header. Your endpoint recomputes the same HMAC over the bytes it received and compares. The critical word is *exact*: if you parse the body into an object and later re-serialize it to verify, whitespace, key order, or number formatting can all change, and the recomputed HMAC won't match something that was, in fact, a legitimate request — which is exactly why signature verification has to happen on the **raw body**, before any parsing.
+
+## Why Next.js needs the raw body before any parsing
+
+A Next.js route handler's \`Request\` only lets you consume its body once. Calling \`req.json()\` first both parses it *and* consumes the stream — there's no getting the original bytes back afterwards to verify against. Read the body as raw bytes first — \`await req.arrayBuffer()\` — verify the signature against those exact bytes, and only decode and \`JSON.parse\` once verification passes. Preferring the raw bytes over \`req.text()\` for the HMAC step avoids even the small risk of a lossy decode changing what gets hashed; well-formed UTF-8 would hash identically either way, but there's no reason to rely on that when the bytes are right there.
+
+## Comparing signatures safely — and what \`timingSafeEqual\` doesn't do for you
+
+A plain \`===\` comparison on two strings returns as soon as it finds the first differing character, and that timing difference is, in principle, information an attacker can measure and exploit to guess a valid signature one byte at a time. Node's \`crypto.timingSafeEqual\` compares two buffers in constant time regardless of where they first differ — but it has a sharp edge: it **throws** if the two buffers aren't the same length, rather than safely returning \`false\`. An attacker who sends a signature header of the wrong length can trigger that throw; if it isn't caught, the endpoint can crash — or worse, a careless \`try { ... } catch { /* treat as ok */ }\` wrapped around it can accidentally treat the thrown error as "verified." Check that the lengths match first (an HMAC-SHA256 digest is always the same length, so a shorter header is already proof of forgery) and only call \`timingSafeEqual\` once both buffers are known to be the same size.
+
+## Rejecting stale timestamps — the delivery timestamp, not the event's own
+
+A captured, validly-signed request can still be replayed later if nothing checks *when it was signed*. Providers include a timestamp and sign it along with the body — typically the HMAC is computed over \`\${timestamp}.\${rawBody}\` — and reject anything older than a short window (a few minutes is typical) even if the signature itself is perfectly valid. The timestamp that matters here is *when this specific delivery attempt was signed*, not when the underlying event originally happened: a provider that retries a failed delivery for hours or days re-signs the same event fresh on every attempt, with a new delivery timestamp each time. Checking the event's own (unchanging) creation time against a short window would reject every one of those legitimate retries — it's the delivery timestamp's freshness that bounds how long a captured request stays useful to a replayer, not the event's.
+
+## Deduping and ordering: at-least-once, with no guaranteed order
+
+Treat every webhook delivery as **at-least-once and unordered**. Store each event by its provider-assigned event id under a unique constraint, so a redelivered event is a safe no-op rather than a repeated side effect — the same natural-idempotency pattern the idempotency topic covers in depth. Ordering needs separate handling: a \`payment.refunded\` event can reach your endpoint before an earlier \`payment.succeeded\` event for the same payment, depending on the provider's own retry timing. Either re-fetch the object's current state from the provider's API before acting, or only apply transitions that move state forward, so an out-of-order delivery can't walk something backwards.
+
+## Acknowledge fast, process after
+
+Respond 2xx as soon as the event is durably recorded — not after whatever processing it triggers has finished. A provider that doesn't hear back quickly will time out and retry, multiplying the exact duplicate-delivery problem the previous section just solved. The jobs-queues topic's claim-then-process pattern is the right shape here: record the event (the "enqueue"), return 2xx, and let a worker do the real processing afterward.
+`.trim(),
+    realWorldExample: `
+A payment provider posts to \`/api/webhooks/payments\` on every payment event. The raw bytes have to survive untouched until after verification:
+\`\`\`ts
+const rawBytes = Buffer.from(await req.arrayBuffer()); // not req.json() — verification needs the exact bytes
+\`\`\`
+The signed payload is \`\${timestamp}.\${rawBody}\`, using the **delivery** timestamp from its own header — not anything embedded in the event — so a retried delivery of an old event is still signed fresh:
+\`\`\`ts
+const timestamp = req.headers.get("x-signature-timestamp") ?? "";
+const signedPayload = Buffer.concat([Buffer.from(\`\${timestamp}.\`), rawBytes]);
+const expected = createHmac("sha256", secret).update(signedPayload).digest();
+const received = Buffer.from(req.headers.get("x-signature") ?? "", "hex");
+const valid = expected.length === received.length && timingSafeEqual(expected, received);
+\`\`\`
+A forged signature of the wrong length now fails the length check and short-circuits *before* \`timingSafeEqual\` ever runs, instead of throwing. Only once verification passes is the body decoded and parsed, with its own try/catch for malformed JSON:
+\`\`\`ts
+let payload: unknown;
+try {
+  payload = JSON.parse(rawBytes.toString("utf8"));
+} catch {
+  return NextResponse.json({ error: "Malformed JSON" }, { status: 400 });
+}
+\`\`\`
+
+Recording the event is what makes redelivery safe, and it's also what lets the endpoint return fast:
+\`\`\`ts
+try {
+  // The full parsed JSON, not the zod-validated event object — a plain z.object() strips any
+  // key the schema didn't declare, and this is a durable record, not just a control-flow check.
+  await db.webhookEvent.create({ data: { eventId: event.id, kind: event.type, payload } });
+} catch (err) {
+  if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+    return NextResponse.json({ ok: true }, { status: 200 }); // already recorded — redelivery, not new work
+  }
+  throw err;
+}
+\`\`\`
+Only after this commits does the handler enqueue the real processing and return 2xx — the provider's retry clock stops the moment this response goes out, long before anything downstream has actually run.
+`.trim(),
+    codeExample: `
+import { NextResponse } from "next/server";
+import { createHmac, timingSafeEqual } from "node:crypto";
+import { z } from "zod";
+import { Prisma } from "@prisma/client";
+
+const WEBHOOK_SECRET = process.env.PAYMENT_WEBHOOK_SECRET!;
+const MAX_REPLAY_WINDOW_SECONDS = 5 * 60;
+
+// Only the fields this handler actually relies on — the full parsed JSON is what gets stored.
+const eventSchema = z.object({
+  id: z.string().min(1),
+  type: z.string().min(1),
+});
+
+function verifySignature(timestamp: string, rawBytes: Buffer, signatureHeader: string | null) {
+  if (!signatureHeader) return false;
+  // Signed over timestamp + body together — see "Rejecting stale timestamps" for why the
+  // delivery timestamp, not anything in the event's own data, is what has to be fresh here.
+  const signedPayload = Buffer.concat([Buffer.from(\`\${timestamp}.\`, "utf8"), rawBytes]);
+  const expected = createHmac("sha256", WEBHOOK_SECRET).update(signedPayload).digest();
+  const received = Buffer.from(signatureHeader, "hex");
+  // Length check first: mismatched lengths are already proof of forgery, and calling
+  // timingSafeEqual on buffers of different lengths throws instead of returning false.
+  return expected.length === received.length && timingSafeEqual(expected, received);
+}
+
+// POST /api/webhooks/payments — verify, dedupe, acknowledge fast; process asynchronously.
+export async function POST(req: Request) {
+  const timestamp = req.headers.get("x-signature-timestamp");
+  // Exact bytes, not a decoded string — req.arrayBuffer() can't be lossy the way a UTF-8
+  // round trip through req.text() theoretically could be, before verification has even run.
+  const rawBytes = Buffer.from(await req.arrayBuffer());
+
+  if (!timestamp || !verifySignature(timestamp, rawBytes, req.headers.get("x-signature"))) {
+    return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
+  }
+
+  const deliveredAt = Number(timestamp);
+  if (!Number.isFinite(deliveredAt) || Math.abs(Date.now() / 1000 - deliveredAt) > MAX_REPLAY_WINDOW_SECONDS) {
+    return NextResponse.json({ error: "Stale request" }, { status: 400 }); // signed, but too old to trust
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(rawBytes.toString("utf8")); // decode and parse only now, after verification
+  } catch {
+    return NextResponse.json({ error: "Malformed JSON" }, { status: 400 });
+  }
+
+  const parsed = eventSchema.safeParse(payload);
+  if (!parsed.success) return NextResponse.json({ error: "Malformed event" }, { status: 400 });
+  const event = parsed.data;
+
+  try {
+    await db.$transaction(async (tx) => {
+      // The full parsed payload, not the "event" variable above — a plain z.object() strips any key the schema
+      // didn't declare, and this is a durable record of what arrived, not a control-flow check.
+      await tx.webhookEvent.create({ data: { eventId: event.id, kind: event.type, payload } });
+      await tx.outboxJob.create({
+        data: { kind: "PROCESS_PAYMENT_EVENT", payload: { eventId: event.id }, status: "PENDING", nextAttemptAt: new Date() },
+      });
+    });
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      return NextResponse.json({ ok: true }, { status: 200 }); // already recorded — a safe no-op, not an error
+    }
+    throw err;
+  }
+
+  return NextResponse.json({ ok: true }, { status: 200 }); // ack now; a worker does the real processing later
+}
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Verifying against a re-parsed or re-serialized body instead of the exact raw bytes.** Whitespace, key order, or number formatting can differ just enough to make a legitimate request fail verification.
+- **Calling \`req.json()\` (or anything that consumes the body) before reading the raw bytes for verification.** There's no getting the original bytes back afterwards.
+- **Comparing signatures with a plain string or buffer equality check.** Timing differences in where the comparison first fails can leak information; use a constant-time comparison instead.
+- **Calling a constant-time comparison on two buffers without checking their lengths match first.** \`crypto.timingSafeEqual\` throws on a length mismatch instead of returning \`false\` — an uncaught throw (or worse, a catch that treats it as "verified") can turn a malformed signature into a crash or a bypass.
+- **Checking the event's own embedded timestamp against the replay window, instead of the delivery timestamp.** A provider retries a failed delivery for hours or days, re-signing the same event fresh each time — checking the event's original time would reject every one of those legitimate retries.
+- **Calling \`JSON.parse\` on the verified body without a try/catch.** A verified signature only proves the bytes weren't tampered with, not that they're valid JSON; a malformed body should be a clean 400, not an unhandled exception.
+- **Storing (or acting on) only the zod-validated subset of a webhook's payload.** A plain \`z.object()\` strips any key the schema didn't declare, so storing the validated object instead of the original parsed JSON silently discards every field the schema didn't name. Validate only the fields the handler relies on; persist the full payload.
+- **Doing the real processing inline before acknowledging.** A provider that times out waiting for 2xx will retry, multiplying exactly the duplicate-delivery problem dedup-by-event-id exists to solve.
+- **Assuming webhook events arrive in the order they happened.** They don't; re-fetch current state or only apply forward-moving transitions.
+`.trim(),
+  },
+};
+
+const concurrencyTopic: SeedTopic = {
+  slug: "concurrency",
+  title: "Concurrency and race conditions",
+  description: "Check-then-act bugs, lost updates and how to make updates atomic.",
+  prerequisiteSlugs: ["transactions"],
+  lesson: {
+    slug: "essentials",
+    title: "Concurrency and race conditions: essentials",
+    level: "INTERMEDIATE",
+    estimatedMinutes: 18,
+    summary:
+      "A race condition needs shared state, concurrency, and a write — and the fix is never \"add a lock variable in your own process\"; it's making the database's own write enforce the invariant, or taking a lock it actually honors across every process that touches the row.",
+    content: `
+A race condition happens when the result depends on the timing of concurrent operations.
+
+- **Check-then-act**: reading stock, checking it in code, then writing lets two requests both pass the check.
+- **Lost update**: two read-modify-write cycles overwrite each other.
+- Fixes: atomic conditional updates (\`UPDATE ... SET stock = stock - 1 WHERE id = $1 AND stock >= 1\`), row locks (\`SELECT ... FOR UPDATE\`), optimistic concurrency (version column), unique constraints, or serializable transactions with retries.
+- A single Node process is single-threaded, but await points still interleave requests — and production runs several processes.
+`.trim(),
+    explanation: `
+## What makes a race condition — briefly
+
+A race condition needs three things: shared state, more than one concurrent operation touching it, and at least one write. The transactions topic already walked through the canonical check-then-act bug in depth — read a value, decide in application code, write back — and its fix, an atomic conditional \`UPDATE ... WHERE\` that makes the condition part of the write itself. This topic goes past that one example into the general toolkit.
+
+## Lost updates
+
+A **lost update** is check-then-act's quieter cousin: two concurrent read-modify-write cycles each read the same starting value, each compute a new value in application code, and whichever writes second overwrites the first's result entirely — not a crash, just silently wrong data (a like counter that gains one instead of two). The fix is the same shape as before: let the database do the arithmetic in one atomic statement (\`likes = likes + 1\`), so there's no "read, compute in JS, write back" round trip to race inside.
+
+## Pessimistic vs optimistic concurrency control
+
+- **Pessimistic**: lock the row before touching it (\`SELECT ... FOR UPDATE\`, covered in depth in the database isolation and locking topic) so a second transaction simply waits. Right for hot rows where conflicts are common and waiting briefly is cheaper than retrying.
+- **Optimistic**: don't lock anything up front; instead, detect at write time whether the row changed since you read it, and treat a conflict as something to retry or report, not prevent. Right for low-contention data where most operations never actually collide, and paying for a lock on every read would be wasted work.
+
+## Optimistic concurrency with a version column
+
+Not every update has a numeric threshold to fold into a \`WHERE\` clause the way stock does. Updating a user's profile, a document's content, or any arbitrary field still needs "nobody else changed this since I read it," without a \`quantity >=\` condition to express it. A version column (or an \`updatedAt\` timestamp) does the same job generically:
+\`\`\`sql
+UPDATE documents
+SET content = $1, version = version + 1
+WHERE id = $2 AND version = $3; -- the version you read, not whatever it is now
+\`\`\`
+If another writer updated the row in between your read and this write, \`version\` no longer matches, zero rows update, and your code must treat that as a conflict — report it to the user, or re-read the current version and retry, depending on whether the two writes could be merged automatically.
+
+## A lock inside your own process doesn't fix a database race
+
+An in-process lock — a \`Map\` used as a mutex, a locking library, an await-based queue — only ever serializes requests inside the one process holding it. The moment there's more than one server instance (and there almost always is in production), two requests landing on different instances see no lock at all between them; the database is still the only thing both instances share, so it's still the only place a real fix can live — an atomic statement, a row lock the database itself grants, or an advisory lock (see database isolation and locking) if what's actually needed is "only one of these running anywhere," not a row to lock.
+
+## Choosing between the two
+
+Default to making the database's write atomic (the transactions topic's pattern) whenever the condition can be expressed in a \`WHERE\` clause. Reach for a version column when it can't. Reach for \`FOR UPDATE\` when several related rows need to move together under one decision. All three put the actual guarantee in the database, which is the one thing every instance and every process genuinely shares.
+`.trim(),
+    realWorldExample: `
+Two browser tabs open the same user's profile settings and both submit an edit a few seconds apart. Without a version check, whichever write lands second silently wins, discarding the first edit with no indication anything was lost:
+\`\`\`ts
+await db.userSettings.update({ where: { userId }, data: { bio } }); // last write wins, silently
+\`\`\`
+Adding the version the client last saw to the \`WHERE\` clause turns a silent overwrite into a detectable conflict:
+\`\`\`ts
+const { count } = await db.userSettings.updateMany({
+  where: { userId, version: clientVersion },
+  data: { bio, version: { increment: 1 } },
+});
+if (count === 0) throw new StaleVersionError(); // someone else changed it since this client last read it
+\`\`\`
+**The fix that doesn't work:** reaching for a process-local lock instead —
+\`\`\`ts
+const locks = new Map<string, boolean>();
+if (locks.get(userId)) throw new Error("Try again"); // only blocks requests on THIS instance
+locks.set(userId, true);
+\`\`\`
+With two server instances behind a load balancer, the two tabs' requests can land on different instances; each sees its own empty \`locks\` map and neither ever sees the other's lock. The version check above works regardless of how many instances exist, because the conflict is detected by the database itself, not by anything living in one process's memory.
+`.trim(),
+    codeExample: `
+import { NextResponse } from "next/server";
+import { z } from "zod";
+
+const updateSettingsSchema = z.object({
+  bio: z.string().max(500),
+  version: z.number().int().nonnegative(), // the version this client last read
+});
+
+// PATCH /api/settings — optimistic concurrency: the WHERE clause's version check is the lock.
+export async function PATCH(req: Request) {
+  const userId = await requireUserId(req);
+  const parsed = updateSettingsSchema.safeParse(await req.json());
+  if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+  const { bio, version } = parsed.data;
+
+  const { count } = await db.userSettings.updateMany({
+    where: { userId, version }, // scoped to the caller AND to the version they actually read
+    data: { bio, version: { increment: 1 } },
+  });
+
+  if (count === 0) {
+    // count === 0 means either a stale version or no row at all — tell those apart instead of
+    // letting a missing row surface as an uncaught throw.
+    const current = await db.userSettings.findUnique({ where: { userId } });
+    if (!current) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return NextResponse.json(
+      { error: "Someone else updated this since you loaded it", current },
+      { status: 409 },
+    );
+  }
+  return NextResponse.json({ ok: true, version: version + 1 });
+}
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Reading a value, deciding in application code, then writing it back.** Across an \`await\`, this is check-then-act no matter how fast it looks — see the transactions topic for the atomic-\`WHERE\` fix.
+- **A lost update from two read-modify-write cycles.** Let the database do the arithmetic (increment/decrement) instead of computing the new value in application code.
+- **Reaching for a process-local lock (a \`Map\`, a mutex library) to "fix" a database race.** It only serializes requests on the one instance holding it; a second instance sees no lock at all.
+- **Using optimistic concurrency but not checking the update's affected row count.** An \`updateMany\` whose \`WHERE\` didn't match still "succeeds" with zero rows changed unless the caller checks for that.
+- **Picking pessimistic locking (\`FOR UPDATE\`) for low-contention data.** Most writers never collide, so every write pays for a lock nothing was ever going to contend over.
+- **Treating a version conflict as a bug to suppress** (retrying blindly without re-reading) **instead of a real signal** that another writer's change needs to be seen before this one proceeds.
+`.trim(),
+  },
+};
+
+const isolationLockingTopic: SeedTopic = {
+  slug: "isolation-locking",
+  title: "Database isolation and locking",
+  description: "Isolation levels, anomalies, row locks and deadlocks in PostgreSQL.",
+  prerequisiteSlugs: ["transactions", "concurrency"],
+  lesson: {
+    slug: "essentials",
+    title: "Database isolation and locking: essentials",
+    level: "ADVANCED",
+    estimatedMinutes: 22,
+    summary:
+      "PostgreSQL's isolation levels promise different things — READ COMMITTED stops dirty reads only; REPEATABLE READ adds a stable snapshot and blocks phantoms, but a concurrent update to a row it's also writing still aborts it with a serialization failure to retry; and SERIALIZABLE goes further still, catching write skew too, which neither weaker level does.",
+    content: `
+- PostgreSQL's default isolation level is **READ COMMITTED**: each statement sees data committed before it began.
+- REPEATABLE READ gives a snapshot for the whole transaction; SERIALIZABLE additionally prevents serialization anomalies and may abort transactions with SQLSTATE 40001 — callers must retry.
+- \`SELECT ... FOR UPDATE\` locks selected rows until commit; \`SKIP LOCKED\` lets workers grab different rows.
+- Deadlocks happen when transactions wait on each other's locks; PostgreSQL aborts one. Lock rows in a consistent order and keep transactions short.
+`.trim(),
+    explanation: `
+## The three isolation levels PostgreSQL actually has
+
+The SQL standard defines four; PostgreSQL implements three, because it never allows dirty reads even at the weakest setting — \`READ UNCOMMITTED\` behaves exactly like \`READ COMMITTED\`.
+
+- **READ COMMITTED** (the default). Each *statement* sees a fresh snapshot of whatever was committed as of the moment that statement began — not the moment the transaction began. Two \`SELECT\`s in the same transaction, moments apart, can see different data if something else committed in between.
+- **REPEATABLE READ**. The whole *transaction* sees one snapshot, taken at its first statement — every read for the rest of the transaction sees that same point in time, however long the transaction runs.
+- **SERIALIZABLE**. Everything REPEATABLE READ gives, plus active detection of anomalies that would only be possible if transactions ran concurrently — if it finds one, it aborts a transaction rather than let the anomaly stand.
+
+## Anomalies, precisely: what each level stops and what it doesn't
+
+- **Dirty read** (reading another transaction's uncommitted change): impossible at every level in PostgreSQL, always.
+- **Non-repeatable read** (re-reading the same row within one transaction and getting a different answer): possible under READ COMMITTED, impossible from REPEATABLE READ up — that's exactly what "repeatable read" names.
+- **Phantom read** (re-running the same query and getting different *rows*, not just different values): possible under READ COMMITTED, impossible from REPEATABLE READ up, for the same reason — one snapshot for the whole transaction.
+- **Write skew**: possible under *both* READ COMMITTED and REPEATABLE READ. This is the one worth being precise about, because "REPEATABLE READ prevents phantoms" is easy to over-generalize into "REPEATABLE READ prevents concurrency bugs" — it doesn't close this one.
+
+## Write skew: the anomaly REPEATABLE READ doesn't catch
+
+Two on-call doctors, a rule that at least one must always be reachable. Both transactions, under REPEATABLE READ, read the same snapshot — each sees *the other* doctor as on call — and each decides, correctly according to what it read, that taking themselves off call is fine. Both commit. Now nobody is on call, and no single statement did anything wrong: each transaction only ever wrote to its *own* row, so there's no write-write conflict for REPEATABLE READ's snapshot isolation to catch — the invariant that broke spanned two rows, and each transaction only looked at (and never re-checked) the other one. SERIALIZABLE is specifically built to catch this shape of anomaly: it tracks the dependency between what one transaction read and what another wrote, and aborts one of the two with a serialization failure rather than let them both commit.
+
+A fix that doesn't require SERIALIZABLE at all: lock the rows the decision actually depends on before deciding. Locking *both* doctors' rows together, in one statement, in a consistent order (the same shape as the deadlock fix below) makes the second transaction block on that \`SELECT ... FOR UPDATE\` until the first commits — and when it resumes, it re-reads the row's now-current, already-updated state, correctly sees the other doctor already off call, and refuses. Locking only the row being written (and not the row the decision reads) doesn't fix this — and locking each row in a different order across the two transactions trades the anomaly for a deadlock instead, which is exactly why the lock has to cover every row the decision depends on, acquired in one consistent order.
+
+## SERIALIZABLE: correctness by aborting, not by blocking
+
+SERIALIZABLE doesn't achieve "as if transactions ran one at a time" by making transactions wait for each other — it lets them proceed concurrently and, after the fact, detects when the result couldn't have arisen from *any* one-at-a-time ordering. A transaction on the losing end of that detection gets aborted with SQLSTATE \`40001\`, not a result. That means application code using SERIALIZABLE **must** be written to retry: wrap the transaction in a bounded retry loop with a small jittered delay between attempts (so the same two transactions retrying in lockstep don't just collide again), and treat \`40001\` as "run it again," not as a failure to surface to the user. This is the trade SERIALIZABLE makes — the strongest correctness guarantee, paid for in retries instead of locks.
+
+## REPEATABLE READ needs retries too
+
+SERIALIZABLE isn't the only level that can abort a transaction and demand a retry. Under REPEATABLE READ, if another transaction commits an update to a row sometime after your snapshot was taken, and your transaction then tries to \`UPDATE\` (or \`DELETE\`) that same row, PostgreSQL can't apply your write against data your snapshot no longer reflects — it raises that same SQLSTATE \`40001\`, "could not serialize access due to concurrent update," and your transaction must retry just the same. REPEATABLE READ's snapshot protects what you *read*; it doesn't extend to a write that collides with someone else's already-committed write to the exact same row. Write skew, above, is the gap *beyond* this one: two transactions each writing a *different* row, which this same-row check can't catch at all, but SERIALIZABLE does.
+
+## Row locks: FOR UPDATE, and how long a lock actually lasts
+
+\`SELECT ... FOR UPDATE\` locks the rows it selects until the current transaction ends — commit or rollback, either one releases it. That duration is the whole point and the whole risk: a lock held across a slow network call (the jobs-queues topic's claim-then-release-immediately pattern exists precisely because of this) blocks every other transaction waiting on that row for exactly as long as the slow call takes. \`FOR UPDATE NOWAIT\` fails immediately instead of waiting if the row is already locked; \`FOR UPDATE SKIP LOCKED\` — covered in depth in the jobs-queues topic for claiming queue rows — skips locked rows instead of waiting *or* failing, a completely different tool for a completely different job: claiming any available row, not waiting for one specific one.
+
+## Deadlocks: cause and the fix
+
+A deadlock is two transactions each holding a lock the other is waiting for — transaction 1 has locked row A and wants row B; transaction 2 has locked row B and wants row A. Neither can proceed, and PostgreSQL detects the cycle and aborts one of them (SQLSTATE \`40P01\`) so the other can continue. The fix isn't to avoid locking — it's to always lock the same rows in the same order, regardless of which transaction got there first: a money transfer should always lock the lower account id before the higher one, never "sender then receiver," which can be either order depending on who's paying whom.
+
+## Advisory locks: locking something that isn't a row
+
+Sometimes the thing that needs mutual exclusion isn't a row at all — "only one instance of this scheduled job should run at a time" has nothing to lock with \`FOR UPDATE\`. PostgreSQL's **advisory locks** lock an arbitrary application-chosen integer key instead of a row — exactly the "distributed mutex" a multi-instance deployment needs for this kind of job, with no Redis required if you're already talking to PostgreSQL. Pick that key as a fixed, manually chosen integer constant for each distinct lock purpose, rather than hashing a name with \`hashtext()\` — it's convenient, but it's an *internal* PostgreSQL function, not a documented, stable part of the public SQL surface, and isn't guaranteed to keep producing the same value across major versions.
+
+## Advisory locks and connection pooling — the trap
+
+The session-level functions (\`pg_advisory_lock\`, \`pg_try_advisory_lock\`, \`pg_advisory_unlock\`) tie the lock to the *database session* — the underlying server connection — not to a transaction. That's a real problem the moment anything sits between your code and PostgreSQL: Prisma, like most clients, manages a pool of connections, and two separate queries — one to lock, a later one to unlock — aren't guaranteed to run on the *same* pooled connection. An unlock issued on the wrong connection does nothing (no error, just silently fails), leaving the lock held by a session your code has already stopped tracking — it leaks until that specific connection happens to close. A transaction-mode connection pooler in front of PostgreSQL (PgBouncer in transaction mode, or Supabase's transaction pooler) makes this worse, not just occasionally wrong: it hands out a different server-side connection per transaction, so a session-level lock can fail to even survive past the statement that acquired it.
+
+The fix is to stop relying on session scope at all. \`pg_try_advisory_xact_lock\` (and the blocking \`pg_advisory_xact_lock\`) ties the lock to the *current transaction* instead — acquired and automatically released at commit or rollback, with no separate unlock call to risk running on a different connection. Run it inside a short \`$transaction\`, which pins one connection for that transaction's whole duration, so the lock's lifetime lines up exactly with the connection holding it — but that also means it only suits a short, DB-only critical section, since a transaction (and the lock with it) shouldn't be held open across a slow network call. For a job whose real work *is* slow, a plain lease row — an ordinary table with a \`lockedUntil\` column, read and written like any other row — sidesteps the whole session/transaction question entirely, at the cost of being one more table to manage.
+`.trim(),
+    realWorldExample: `
+Two on-call doctors, under REPEATABLE READ, each check that the other is on call and then take themselves off:
+\`\`\`sql
+-- Doctor A's transaction
+SELECT on_call FROM doctors WHERE id = 'B'; -- true, from A's snapshot
+UPDATE doctors SET on_call = false WHERE id = 'A';
+COMMIT;
+\`\`\`
+\`\`\`sql
+-- Doctor B's transaction, running concurrently
+SELECT on_call FROM doctors WHERE id = 'A'; -- true, from B's snapshot
+UPDATE doctors SET on_call = false WHERE id = 'B';
+COMMIT;
+\`\`\`
+Both commit. REPEATABLE READ gave each transaction a stable snapshot, which is exactly why neither one ever saw the other's write — they touched different rows, so there was no write-write conflict to detect, and the invariant ("at least one doctor on call") broke anyway. Rerunning the same two transactions under SERIALIZABLE, PostgreSQL detects the dependency between what each one read and what the other wrote, and aborts one with a serialization failure — only the surviving transaction's commit happens, and the aborted one must be retried by the application. Locking both doctors' rows together with \`FOR UPDATE\` before deciding fixes the same anomaly without SERIALIZABLE: the second transaction blocks on the lock instead of deciding from a stale snapshot, and re-reads the already-updated row once it resumes.
+
+**A different kind of mutual exclusion.** A nightly reconciliation job must never run twice concurrently — but there's no row representing "is the job running," so \`FOR UPDATE\` has nothing to lock. Tying the lock to the transaction, not the session, avoids the connection-pooling trap above:
+\`\`\`sql
+SELECT pg_try_advisory_xact_lock(482910337); -- a fixed key, not hashtext() — see above
+\`\`\`
+A \`false\` result means another instance already holds it this transaction; skip this run rather than wait. Because the lock only lasts as long as the transaction, this fits a short, DB-only critical section — a job whose real work is slow (a network call, a long scan, like the reconciliation itself) needs the lease-row approach instead, claimed with an ordinary conditional update rather than any lock tied to a session or a transaction.
+`.trim(),
+    codeExample: `
+import { Prisma } from "@prisma/client";
+
+async function withSerializableRetry<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>, maxAttempts = 3): Promise<T> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await db.$transaction(fn, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (err) {
+      // P2034: Prisma's code for a serialization failure or deadlock (PostgreSQL SQLSTATE 40001/40P01).
+      // SERIALIZABLE's whole correctness model depends on the caller retrying this, not surfacing it.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2034" && attempt < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, 20 + Math.random() * 80)); // jitter — the
+        // same two transactions retrying in lockstep, with no delay, would likely just collide again.
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("unreachable");
+}
+
+// The on-call anomaly: under anything weaker than SERIALIZABLE, each transaction's read of the
+// OTHER doctor's status comes from a snapshot that never notices the other's concurrent write.
+async function takeOffCall(doctorId: string, otherDoctorId: string) {
+  return withSerializableRetry(async (tx) => {
+    const other = await tx.doctor.findUniqueOrThrow({ where: { id: otherDoctorId } });
+    if (!other.onCall) throw new Error("At least one doctor must remain on call");
+    return tx.doctor.update({ where: { id: doctorId }, data: { onCall: false } });
+  });
+}
+
+// The same fix without SERIALIZABLE: lock both rows together, in a consistent order, before
+// deciding — the second caller blocks on FOR UPDATE and re-reads the already-updated row once
+// it resumes, instead of deciding from a stale snapshot. Locking only one row (or both, but in
+// a different order in each caller) either misses the fix or trades it for a deadlock.
+async function takeOffCallWithRowLock(doctorId: string, otherDoctorId: string) {
+  return db.$transaction(async (tx) => {
+    const [idA, idB] = [doctorId, otherDoctorId].sort();
+    await tx.$queryRaw\`SELECT id FROM "Doctor" WHERE id IN (\${idA}, \${idB}) ORDER BY id FOR UPDATE\`;
+
+    const other = await tx.doctor.findUniqueOrThrow({ where: { id: otherDoctorId } });
+    if (!other.onCall) throw new Error("At least one doctor must remain on call");
+    return tx.doctor.update({ where: { id: doctorId }, data: { onCall: false } });
+  });
+}
+
+// A fixed, manually chosen key per lock purpose — not hashtext(), an internal function with no
+// stability guarantee across PostgreSQL versions.
+const RECONCILIATION_LOCK_KEY = 482_910_337;
+
+// A short, DB-only critical section. pg_try_advisory_xact_lock ties the lock to this transaction,
+// not a session, so it's safe through a connection pool (and a transaction-mode pooler such as
+// PgBouncer or Supabase's transaction pooler) — unlike the session-level pg_try_advisory_lock /
+// pg_advisory_unlock pair, whose separate lock and unlock calls aren't guaranteed to land on the
+// same underlying connection and can silently leak the lock.
+async function runShortExclusiveTask() {
+  return db.$transaction(async (tx) => {
+    const [{ locked }] = await tx.$queryRaw<{ locked: boolean }[]>\`
+      SELECT pg_try_advisory_xact_lock(\${RECONCILIATION_LOCK_KEY}) AS locked
+    \`;
+    if (!locked) return; // another instance already holds it — skip, don't wait
+    await doShortDbOnlyWork(tx);
+  }); // commit releases the lock automatically — no separate unlock call to get wrong
+}
+
+// A long-running job (network calls, slow scans) can't hold a transaction open for its whole
+// duration — a lease row sidesteps the session/pooling question entirely, since it's just data.
+async function runNightlyReconciliationOnce() {
+  const now = new Date();
+  const { count } = await db.jobLease.updateMany({
+    where: { name: "nightly-reconciliation", lockedUntil: { lt: now } },
+    data: { lockedUntil: new Date(now.getTime() + 30 * 60_000) }, // claim for 30 minutes
+  });
+  if (count === 0) return; // another instance already holds an unexpired lease
+
+  await runReconciliation(); // the real, possibly slow work — no transaction held open for it
+}
+`.trim(),
+    codeLanguage: "TYPESCRIPT",
+    commonMistakes: `
+- **Assuming REPEATABLE READ prevents all concurrency anomalies because it prevents phantoms.** It does not catch write skew, where two transactions each read a stable snapshot and each write to a different row, breaking an invariant that spans both.
+- **Assuming only SERIALIZABLE ever produces a serialization failure to retry.** REPEATABLE READ raises the same SQLSTATE 40001 when a transaction tries to update a row that another, already-committed transaction updated after its snapshot was taken — both levels need an application-side retry loop, not just SERIALIZABLE.
+- **Treating a serialization failure (SQLSTATE 40001) as an application error to surface to the user.** It's a signal to retry the whole transaction, which the application must be written to do — ideally with a small jittered delay, so the same two transactions don't just collide again immediately.
+- **Holding a \`FOR UPDATE\` row lock across a network call.** The jobs-queues topic's claim-then-process pattern exists precisely to avoid this; the lock lasts exactly as long as the transaction, so a slow call inside one blocks everyone else waiting on that row for just as long.
+- **Locking the same set of rows in different orders in different code paths.** That's exactly what produces a deadlock; always lock in one consistent order (e.g. by id) — and for a write-skew-style decision, lock every row the decision depends on, not just the row being written.
+- **Using the session-level advisory lock functions (\`pg_advisory_lock\`, \`pg_advisory_unlock\`) through a connection pool.** The lock and its unlock aren't guaranteed to run on the same pooled connection — an unlock on the wrong one silently does nothing, leaking the lock — and a transaction-mode pooler (PgBouncer, Supabase's transaction pooler) can break session-level locks even worse. Use \`pg_try_advisory_xact_lock\` in a short transaction, or a lease row, instead.
+- **Hashing a name with \`hashtext()\` to get an advisory lock key.** It's an internal PostgreSQL function with no guarantee of producing the same value across versions; use a fixed, manually chosen integer constant per lock purpose instead.
+- **Reaching for \`SKIP LOCKED\` when the goal is "wait for this specific row," or \`FOR UPDATE\` alone when the goal is "claim any available row."** They solve different problems; the jobs-queues topic covers the \`SKIP LOCKED\` claiming case in depth.
+`.trim(),
+  },
+};
+
 const topics: SeedTopic[] = [
   httpTopic,
   restTopic,
@@ -1856,35 +2485,10 @@ const topics: SeedTopic[] = [
   cachingTopic,
   rateLimitingTopic,
   jobsQueuesTopic,
-  t("webhooks", "Webhooks and polling", "Push vs pull integration, signature verification and robust receivers.", `
-- **Polling** asks repeatedly ("anything new?"); simple but wasteful and delayed. **Webhooks** push events to your endpoint as they happen.
-- Verify every webhook: compute an HMAC over the **raw** request body with the shared secret, compare in constant time, and reject old timestamps to stop replays.
-- Acknowledge fast (2xx), then process asynchronously.
-- Expect duplicates and out-of-order delivery: store processed event ids with a unique constraint and re-fetch current state when order matters.
-- Keep a reconciliation poll as a safety net for missed events.
-`),
-  t("idempotency", "Idempotency", "Designing operations that are safe to retry.", `
-An operation is idempotent when doing it twice has the same effect as doing it once. Networks time out, clients retry, and queues redeliver — so side-effecting operations must be safe to repeat.
-
-- **Idempotency keys**: the client sends a unique key (e.g. \`Idempotency-Key\` header); the server stores key + request fingerprint + result, and returns the stored result on retry.
-- Reject reuse of a key with a different payload.
-- Natural idempotency: unique constraints and upserts ("insert if not exists") make duplicates impossible at the database level.
-- Make the key record and the side effect commit together, or handle the "in progress" state explicitly.
-`),
-  t("concurrency", "Concurrency and race conditions", "Check-then-act bugs, lost updates and how to make updates atomic.", `
-A race condition happens when the result depends on the timing of concurrent operations.
-
-- **Check-then-act**: reading stock, checking it in code, then writing lets two requests both pass the check.
-- **Lost update**: two read-modify-write cycles overwrite each other.
-- Fixes: atomic conditional updates (\`UPDATE ... SET stock = stock - 1 WHERE id = $1 AND stock >= 1\`), row locks (\`SELECT ... FOR UPDATE\`), optimistic concurrency (version column), unique constraints, or serializable transactions with retries.
-- A single Node process is single-threaded, but await points still interleave requests — and production runs several processes.
-`),
-  t("isolation-locking", "Database isolation and locking", "Isolation levels, anomalies, row locks and deadlocks in PostgreSQL.", `
-- PostgreSQL's default isolation level is **READ COMMITTED**: each statement sees data committed before it began.
-- REPEATABLE READ gives a snapshot for the whole transaction; SERIALIZABLE additionally prevents serialization anomalies and may abort transactions with SQLSTATE 40001 — callers must retry.
-- \`SELECT ... FOR UPDATE\` locks selected rows until commit; \`SKIP LOCKED\` lets workers grab different rows.
-- Deadlocks happen when transactions wait on each other's locks; PostgreSQL aborts one. Lock rows in a consistent order and keep transactions short.
-`),
+  idempotencyTopic,
+  webhooksTopic,
+  concurrencyTopic,
+  isolationLockingTopic,
   t("observability", "Logging, monitoring, and error handling", "Structured logs, metrics, traces, alerting and safe error responses.", `
 - **Logs** explain individual events; **metrics** show trends and trigger alerts; **traces** follow one request across services.
 - Log structured JSON with a request/correlation id; never log passwords, tokens or full card numbers.
